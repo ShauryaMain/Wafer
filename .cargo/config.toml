@@ -1,0 +1,3 @@
+[alias]
+# `cargo wafer test` runs the wafer command without installing it.
+wafer = "run --quiet --package wafer-cli --"

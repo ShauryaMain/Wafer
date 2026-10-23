@@ -1,0 +1,20 @@
+// Adds two bits. sum is the low bit of the answer and carry is the high
+// bit, so 1 + 1 gives sum 0, carry 1 (binary 10).
+//
+// Xor and And here are our own versions from Xor.chip and And.chip, so
+// this whole chip is made of Nand gates.
+chip HalfAdder {
+  in  a, b
+  out sum, carry
+
+  sum   = Xor(a, b)
+  carry = And(a, b)
+}
+
+test HalfAdder {
+  // a b | sum carry
+     0 0 | 0   0
+     0 1 | 1   0
+     1 0 | 1   0
+     1 1 | 0   1
+}

@@ -1,0 +1,19 @@
+// Xor from four Nands, the classic way: n1 is 0 only when both inputs
+// are 1, and n2 and n3 each let one input through unless both are 1.
+chip Xor {
+  in  a, b
+  out out
+
+  n1  = Nand(a, b)
+  n2  = Nand(a, n1)
+  n3  = Nand(b, n1)
+  out = Nand(n2, n3)
+}
+
+test Xor {
+  // a b | out
+     0 0 | 0
+     0 1 | 1
+     1 0 | 1
+     1 1 | 0
+}

@@ -1,0 +1,16 @@
+// And: a Nand, flipped by our own Not.
+chip And {
+  in  a, b
+  out out
+
+  n   = Nand(a, b)
+  out = Not(n)
+}
+
+test And {
+  // a b | out
+     0 0 | 0
+     0 1 | 0
+     1 0 | 0
+     1 1 | 1
+}

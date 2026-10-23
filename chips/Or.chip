@@ -1,0 +1,18 @@
+// Or: "a or b" is the same as "not (not a and not b)", so flip both
+// inputs and Nand them.
+chip Or {
+  in  a, b
+  out out
+
+  na  = Not(a)
+  nb  = Not(b)
+  out = Nand(na, nb)
+}
+
+test Or {
+  // a b | out
+     0 0 | 0
+     0 1 | 1
+     1 0 | 1
+     1 1 | 1
+}

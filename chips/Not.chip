@@ -1,0 +1,16 @@
+// Not, built from one Nand: Nand(a, a) is 1 only when a is 0.
+//
+// Because this chip is named Not, it replaces the built-in Not everywhere
+// in this project, and `wafer test` checks that the two agree.
+chip Not {
+  in  a
+  out out
+
+  out = Nand(a, a)
+}
+
+test Not {
+  // a | out
+     0 | 1
+     1 | 0
+}

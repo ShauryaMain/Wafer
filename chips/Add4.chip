@@ -1,0 +1,25 @@
+// Adds two 4-bit numbers by chaining four full adders. The carry ripples
+// up from bit 0 to bit 3, one adder at a time, which is why bigger adders
+// take more gate delays to settle.
+chip Add4 {
+  in  a[4], b[4], cin
+  out sum[4], cout
+
+  fa0 = FullAdder(a[0], b[0], cin)
+  fa1 = FullAdder(a[1], b[1], fa0.cout)
+  fa2 = FullAdder(a[2], b[2], fa1.cout)
+  fa3 = FullAdder(a[3], b[3], fa2.cout)
+
+  sum  = {fa3.sum, fa2.sum, fa1.sum, fa0.sum}
+  cout = fa3.cout
+}
+
+test Add4 {
+  // a    b    cin | sum  cout
+     0x0  0x0  0   | 0x0  0
+     0x3  0x4  0   | 0x7  0
+     0x7  0x1  0   | 0x8  0
+     0xF  0x1  0   | 0x0  1
+     0x9  0x9  1   | 0x3  1
+     0xF  0xF  1   | 0xF  1
+}

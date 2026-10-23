@@ -1,0 +1,21 @@
+// A set/reset latch: two Nands feeding each other, so it remembers a bit.
+// Pull s_n to 0 to set q to 1; pull r_n to 0 to reset it (the _n means
+// "active at 0"). With both at 1, it holds whatever it was.
+//
+// This only works because every gate takes a time step. It's the seed of
+// every register and memory cell to come.
+chip SRLatch {
+  in  s_n, r_n
+  out q, q_n
+
+  q   = Nand(s_n, q_n)
+  q_n = Nand(r_n, q)
+}
+
+test SRLatch {
+  // s_n r_n | q q_n
+     0   1   | 1 0     // set
+     1   1   | 1 0     // hold: still 1
+     1   0   | 0 1     // reset
+     1   1   | 0 1     // hold: still 0
+}

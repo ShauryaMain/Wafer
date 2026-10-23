@@ -1,0 +1,23 @@
+// Adds three bits: a, b, and a carry coming in from the bit below.
+// Two half adders do the work, and if either one carries, so do we.
+chip FullAdder {
+  in  a, b, cin
+  out sum, cout
+
+  h1   = HalfAdder(a, b)
+  h2   = HalfAdder(h1.sum, cin)
+  sum  = h2.sum
+  cout = Or(h1.carry, h2.carry)
+}
+
+test FullAdder {
+  // a b cin | sum cout
+     0 0 0   | 0   0
+     0 0 1   | 1   0
+     0 1 0   | 1   0
+     0 1 1   | 0   1
+     1 0 0   | 1   0
+     1 0 1   | 0   1
+     1 1 0   | 0   1
+     1 1 1   | 1   1
+}

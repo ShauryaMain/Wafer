@@ -1,0 +1,7 @@
+[package]
+name = "wafer-core"
+description = "Wafer's engine: the .chip parser, checker, simulator, test runner and schematic layout"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

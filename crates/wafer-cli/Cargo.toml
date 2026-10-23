@@ -1,0 +1,14 @@
+[package]
+name = "wafer-cli"
+description = "The `wafer` command: check, test, simulate and render chips"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "wafer"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+resvg = "0.48.1"
+wafer-core = { path = "../wafer-core" }
