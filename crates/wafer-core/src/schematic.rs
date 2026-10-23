@@ -40,6 +40,8 @@ pub struct Schematic {
 
 #[derive(Clone, Debug)]
 pub struct Node {
+    /// Stable identity for saved positions: `in:a`, `out:sum`, or a box's name.
+    pub key: String,
     pub kind: NodeKind,
     pub x: f32,
     pub y: f32,
@@ -77,6 +79,10 @@ pub struct Wire {
     /// Where to print a bus's value: just right of its source pin. Inputs
     /// already show their value in their box, so they have none.
     pub label_at: Option<(f32, f32)>,
+    /// The output pin it starts at, as (node index, output pin index).
+    pub source: (usize, usize),
+    /// Every input pin it feeds, as (node index, input pin index).
+    pub sinks: Vec<(usize, usize)>,
 }
 
 #[derive(Clone, Debug)]
@@ -164,66 +170,178 @@ struct Trunk {
     to: Vec<End>,
 }
 
-pub fn layout(design: &Design, sources: &SourceMap, chip: &str) -> Option<Schematic> {
-    let info = design.chips.get(chip)?;
-    let nin = info.inputs.len();
-    let out_base = nin + info.instances.len();
+/// A chip's boxes, pins and connections, before anything is placed.
+struct Graph<'a> {
+    resolver: Resolver<'a>,
+    kinds: Vec<NodeKind>,
+    keys: Vec<String>,
+    geoms: Vec<Geom>,
+    sinks: Vec<Sink>,
+    /// Every (source, sink index) connection, once each.
+    pairs: Vec<(Source, usize)>,
+    nin: usize,
+    out_base: usize,
+}
 
-    // Boxes.
-    let mut kinds = Vec::new();
-    let mut geoms = Vec::new();
-    for port in &info.inputs {
-        kinds.push(NodeKind::Input { name: port.name.clone(), width: port.width });
-        geoms.push(port_geom(port.width, true));
-    }
-    for inst in &info.instances {
-        match &inst.callee {
-            Callee::Gate { kind, .. } => {
-                kinds.push(NodeKind::Gate { name: inst.name.clone(), kind: *kind });
-                geoms.push(gate_geom(*kind));
-            }
-            Callee::Chip(chip) => {
-                kinds.push(NodeKind::Chip { name: inst.name.clone(), chip: chip.clone() });
-                geoms.push(chip_geom(chip, &design.signature(&inst.callee)));
-            }
-            Callee::Unknown => {
-                kinds.push(NodeKind::Chip { name: inst.name.clone(), chip: "?".into() });
-                geoms.push(chip_geom("?", &Signature::default()));
+impl<'a> Graph<'a> {
+    fn build(design: &'a Design, sources: &'a SourceMap, chip: &str) -> Option<Graph<'a>> {
+        let info = design.chips.get(chip)?;
+        let nin = info.inputs.len();
+        let out_base = nin + info.instances.len();
+
+        let mut kinds = Vec::new();
+        let mut keys = Vec::new();
+        let mut geoms = Vec::new();
+        for port in &info.inputs {
+            kinds.push(NodeKind::Input { name: port.name.clone(), width: port.width });
+            keys.push(format!("in:{}", port.name));
+            geoms.push(port_geom(port.width, true));
+        }
+        for inst in &info.instances {
+            keys.push(inst.name.clone());
+            match &inst.callee {
+                Callee::Gate { kind, .. } => {
+                    kinds.push(NodeKind::Gate { name: inst.name.clone(), kind: *kind });
+                    geoms.push(gate_geom(*kind));
+                }
+                Callee::Chip(chip) => {
+                    kinds.push(NodeKind::Chip { name: inst.name.clone(), chip: chip.clone() });
+                    geoms.push(chip_geom(chip, &design.signature(&inst.callee)));
+                }
+                Callee::Unknown => {
+                    kinds.push(NodeKind::Chip { name: inst.name.clone(), chip: "?".into() });
+                    geoms.push(chip_geom("?", &Signature::default()));
+                }
             }
         }
-    }
-    for port in &info.outputs {
-        kinds.push(NodeKind::Output { name: port.name.clone(), width: port.width });
-        geoms.push(port_geom(port.width, false));
-    }
-    let n = kinds.len();
+        for port in &info.outputs {
+            kinds.push(NodeKind::Output { name: port.name.clone(), width: port.width });
+            keys.push(format!("out:{}", port.name));
+            geoms.push(port_geom(port.width, false));
+        }
 
-    // What feeds each pin.
-    let resolver = Resolver { design, info, sources, nin };
-    let mut sinks = Vec::new();
-    for (k, inst) in info.instances.iter().enumerate() {
-        for (pin, expr) in inst.inputs.iter().enumerate() {
-            if let Some(expr) = expr {
-                sinks.push(Sink { node: nin + k, pin, parts: resolver.resolve(expr, 0) });
+        // What feeds each pin.
+        let resolver = Resolver { design, info, sources, nin };
+        let mut sinks = Vec::new();
+        for (k, inst) in info.instances.iter().enumerate() {
+            for (pin, expr) in inst.inputs.iter().enumerate() {
+                if let Some(expr) = expr {
+                    sinks.push(Sink { node: nin + k, pin, parts: resolver.resolve(expr, 0) });
+                }
             }
         }
-    }
-    for j in 0..info.outputs.len() {
-        sinks.push(Sink { node: out_base + j, pin: 0, parts: resolver.drivers(Name::Output(j), 0) });
-    }
-    let mut pairs: Vec<(Source, usize)> = Vec::new();
-    for (si, sink) in sinks.iter().enumerate() {
-        for part in &sink.parts {
-            if let Some(source) = part.source
-                && !pairs.contains(&(source, si)) {
+        for j in 0..info.outputs.len() {
+            sinks.push(Sink { node: out_base + j, pin: 0, parts: resolver.drivers(Name::Output(j), 0) });
+        }
+        let mut pairs: Vec<(Source, usize)> = Vec::new();
+        for (si, sink) in sinks.iter().enumerate() {
+            for part in &sink.parts {
+                if let Some(source) = part.source
+                    && !pairs.contains(&(source, si))
+                {
                     pairs.push((source, si));
                 }
+            }
         }
+        Some(Graph { resolver, kinds, keys, geoms, sinks, pairs, nin, out_base })
     }
+
+    fn out_pin(&self, positions: &[(f32, f32)], source: Source) -> (f32, f32) {
+        let (x, y) = positions[source.node];
+        let g = &self.geoms[source.node];
+        (x + g.w, y + g.out_off[source.pin])
+    }
+
+    fn in_pin(&self, positions: &[(f32, f32)], node: usize, pin: usize) -> (f32, f32) {
+        let (x, y) = positions[node];
+        (x, y + self.geoms[node].in_off[pin])
+    }
+
+    /// Turns placed boxes and routed segments into the finished schematic.
+    fn assemble(
+        &self,
+        chip: &str,
+        positions: &[(f32, f32)],
+        segments: BTreeMap<Source, Vec<[f32; 4]>>,
+        width: f32,
+        height: f32,
+    ) -> Schematic {
+        let mut wires = Vec::new();
+        for (source, segs) in segments {
+            let (signal, bits) = self.resolver.source_signal(source);
+            let (segments, dots) = tidy(segs);
+            let (sx, sy) = self.out_pin(positions, source);
+            let label_at = (source.node >= self.nin).then_some((sx + 6.0, sy - 7.0));
+            let mut sinks: Vec<(usize, usize)> = Vec::new();
+            for &(s, si) in &self.pairs {
+                let target = (self.sinks[si].node, self.sinks[si].pin);
+                if s == source && !sinks.contains(&target) {
+                    sinks.push(target);
+                }
+            }
+            wires.push(Wire {
+                signal,
+                width: bits,
+                segments,
+                dots,
+                label_at,
+                source: (source.node, source.pin),
+                sinks,
+            });
+        }
+
+        let mut nodes = Vec::new();
+        for (v, &(x, y)) in positions.iter().enumerate() {
+            let g = &self.geoms[v];
+            let pins = |names: &[String], offs: &[f32], px: f32| -> Vec<Pin> {
+                names.iter().zip(offs).map(|(name, off)| Pin { name: name.clone(), x: px, y: y + off }).collect()
+            };
+            nodes.push(Node {
+                key: self.keys[v].clone(),
+                kind: self.kinds[v].clone(),
+                x,
+                y,
+                w: g.w,
+                h: g.h,
+                inputs: pins(&g.in_names, &g.in_off, x),
+                outputs: pins(&g.out_names, &g.out_off, x + g.w),
+            });
+        }
+
+        let mut tags = Vec::new();
+        for sink in &self.sinks {
+            let pin = &nodes[sink.node].inputs[sink.pin];
+            let mut stacked = 0.0;
+            for part in &sink.parts {
+                if let Some(text) = &part.constant {
+                    tags.push(Tag { x: pin.x - 2.0, y: pin.y, text: text.clone(), kind: TagKind::Constant });
+                } else if let Some(text) = &part.label {
+                    tags.push(Tag {
+                        x: pin.x - 4.0,
+                        y: pin.y - 8.0 - stacked,
+                        text: text.clone(),
+                        kind: TagKind::Bits,
+                    });
+                    stacked += 12.0;
+                }
+            }
+        }
+        Schematic { chip: chip.into(), width, height, nodes, wires, tags }
+    }
+}
+
+/// Lays a chip out automatically in columns. Used whenever a chip has no
+/// saved positions.
+pub fn layout(design: &Design, sources: &SourceMap, chip: &str) -> Option<Schematic> {
+    let graph = Graph::build(design, sources, chip)?;
+    let info = graph.resolver.info;
+    let (nin, out_base) = (graph.nin, graph.out_base);
+    let (kinds, geoms, sinks, pairs) = (&graph.kinds, &graph.geoms, &graph.sinks, &graph.pairs);
+    let n = kinds.len();
 
     // Columns: longest path from the inputs, ignoring feedback loops.
     let mut adj = vec![Vec::new(); n];
-    for &(source, si) in &pairs {
+    for &(source, si) in pairs.iter() {
         let to = sinks[si].node;
         if !adj[source.node].contains(&to) {
             adj[source.node].push(to);
@@ -255,7 +373,7 @@ pub fn layout(design: &Design, sources: &SourceMap, chip: &str) -> Option<Schema
     let mut dummy_at: HashMap<(Source, usize), usize> = HashMap::new();
     let mut links = Vec::new();
     let mut feedback = Vec::new();
-    for &(source, si) in &pairs {
+    for &(source, si) in pairs.iter() {
         let sink = &sinks[si];
         let (from_layer, to_layer) = (layer[source.node], layer[sink.node]);
         if to_layer <= from_layer {
@@ -272,7 +390,12 @@ pub fn layout(design: &Design, sources: &SourceMap, chip: &str) -> Option<Schema
             links.push(Link { from: prev.0, from_off: prev.1, to: Slot::Dummy(d), to_off: DUMMY_H / 2.0 });
             prev = (Slot::Dummy(d), DUMMY_H / 2.0);
         }
-        links.push(Link { from: prev.0, from_off: prev.1, to: Slot::Node(sink.node), to_off: geoms[sink.node].in_off[sink.pin] });
+        links.push(Link {
+            from: prev.0,
+            from_off: prev.1,
+            to: Slot::Node(sink.node),
+            to_off: geoms[sink.node].in_off[sink.pin],
+        });
     }
 
     order_columns(&mut columns, &links, last);
@@ -343,7 +466,7 @@ pub fn layout(design: &Design, sources: &SourceMap, chip: &str) -> Option<Schema
     };
     let mut trunks: Vec<Trunk> = Vec::new();
     let mut trunk_index: HashMap<(usize, Source), usize> = HashMap::new();
-    for &(source, si) in &pairs {
+    for &(source, si) in pairs.iter() {
         let sink = &sinks[si];
         let (from_layer, to_layer) = (layer[source.node], layer[sink.node]);
         if to_layer <= from_layer {
@@ -427,7 +550,7 @@ pub fn layout(design: &Design, sources: &SourceMap, chip: &str) -> Option<Schema
         col_w[layer[v]] = col_w[layer[v]].max(geoms[v].w);
     }
     let mut label_room = vec![0.0f32; last + 1];
-    for sink in &sinks {
+    for sink in sinks.iter() {
         for part in &sink.parts {
             let text = part.constant.as_ref().or(part.label.as_ref());
             if let Some(text) = text {
@@ -437,16 +560,10 @@ pub fn layout(design: &Design, sources: &SourceMap, chip: &str) -> Option<Schema
             }
         }
     }
-    let input_label_w = info
-        .inputs
-        .iter()
-        .map(|p| port_label(&p.name, p.width).chars().count() as f32 * CHAR_W)
-        .fold(0.0, f32::max);
-    let output_label_w = info
-        .outputs
-        .iter()
-        .map(|p| port_label(&p.name, p.width).chars().count() as f32 * CHAR_W)
-        .fold(0.0, f32::max);
+    let input_label_w =
+        info.inputs.iter().map(|p| port_label(&p.name, p.width).chars().count() as f32 * CHAR_W).fold(0.0, f32::max);
+    let output_label_w =
+        info.outputs.iter().map(|p| port_label(&p.name, p.width).chars().count() as f32 * CHAR_W).fold(0.0, f32::max);
     let mut col_x = vec![MARGIN + input_label_w + 12.0; last + 1];
     for l in 0..last {
         let gap = ((channel_count[l] + 1) as f32 * CHANNEL_STEP + label_room[l + 1]).max(MIN_GAP);
@@ -513,57 +630,238 @@ pub fn layout(design: &Design, sources: &SourceMap, chip: &str) -> Option<Schema
         ]);
     }
 
-    let mut wires = Vec::new();
-    for (source, segs) in segments {
-        let (signal, width) = resolver.source_signal(source);
-        let (segments, dots) = tidy(segs);
-        let (sx, sy) = end_xy(End::Out(source));
-        let label_at = (source.node >= nin).then_some((sx + 6.0, sy - 7.0));
-        wires.push(Wire { signal, width, segments, dots, label_at });
-    }
+    let positions: Vec<(f32, f32)> = (0..n).map(|v| (node_x(v), top[&Slot::Node(v)])).collect();
+    let lanes_bottom = if feedback.is_empty() { bottom } else { lane_y(feedback.len() - 1) };
+    let width = col_x[last] + col_w[last] + output_label_w + MARGIN + 12.0;
+    Some(graph.assemble(chip, &positions, segments, width, lanes_bottom + MARGIN + 8.0))
+}
 
-    // Finished boxes with absolute pins.
-    let mut nodes = Vec::new();
+/// Lays a chip out from saved positions (top-left corners keyed by
+/// [`Node::key`]). Boxes without a saved position go next to whatever feeds
+/// them. Coordinates are kept as saved; call [`Schematic::fit`] before
+/// drawing it as an image.
+pub fn arrange(
+    design: &Design,
+    sources: &SourceMap,
+    chip: &str,
+    saved: &HashMap<String, (f32, f32)>,
+) -> Option<Schematic> {
+    let graph = Graph::build(design, sources, chip)?;
+    let n = graph.kinds.len();
+    let mut placed: Vec<Option<(f32, f32)>> = graph.keys.iter().map(|k| saved.get(k).copied()).collect();
     for v in 0..n {
-        let (x, y) = (node_x(v), top[&Slot::Node(v)]);
-        let g = &geoms[v];
-        let pins = |names: &[String], offs: &[f32], px: f32| {
-            names.iter().zip(offs).map(|(name, off)| Pin { name: name.clone(), x: px, y: y + off }).collect()
-        };
-        nodes.push(Node {
-            kind: kinds[v].clone(),
-            x,
-            y,
-            w: g.w,
-            h: g.h,
-            inputs: pins(&g.in_names, &g.in_off, x),
-            outputs: pins(&g.out_names, &g.out_off, x + g.w),
-        });
-    }
-
-    let mut tags = Vec::new();
-    for sink in &sinks {
-        let pin = &nodes[sink.node].inputs[sink.pin];
-        let mut stacked = 0.0;
-        for part in &sink.parts {
-            if let Some(text) = &part.constant {
-                tags.push(Tag { x: pin.x - 2.0, y: pin.y, text: text.clone(), kind: TagKind::Constant });
-            } else if let Some(text) = &part.label {
-                tags.push(Tag { x: pin.x - 4.0, y: pin.y - 8.0 - stacked, text: text.clone(), kind: TagKind::Bits });
-                stacked += 12.0;
-            }
+        if placed[v].is_none() {
+            placed[v] = Some(place_new(&graph, &placed, v));
         }
     }
+    let positions: Vec<(f32, f32)> = placed.into_iter().map(|p| p.unwrap_or_default()).collect();
+    let segments = route_free(&graph, &positions);
 
-    let lanes_bottom = if feedback.is_empty() { bottom } else { lane_y(feedback.len() - 1) };
-    Some(Schematic {
-        chip: chip.into(),
-        width: col_x[last] + col_w[last] + output_label_w + MARGIN + 12.0,
-        height: lanes_bottom + MARGIN + 8.0,
-        nodes,
-        wires,
-        tags,
-    })
+    let mut right = 0.0f32;
+    let mut bottom = 0.0f32;
+    for (v, &(x, y)) in positions.iter().enumerate() {
+        right = right.max(x + graph.geoms[v].w + 80.0);
+        bottom = bottom.max(y + graph.geoms[v].h);
+    }
+    for seg in segments.values().flatten() {
+        bottom = bottom.max(seg[1]).max(seg[3]);
+    }
+    Some(graph.assemble(chip, &positions, segments, right + MARGIN, bottom + MARGIN))
+}
+
+/// Picks a spot for a box with no saved position: right of what feeds it,
+/// or below everything else, nudged down until it doesn't overlap.
+fn place_new(graph: &Graph, placed: &[Option<(f32, f32)>], v: usize) -> (f32, f32) {
+    let g = &graph.geoms[v];
+    let others: Vec<(usize, (f32, f32))> = placed.iter().enumerate().filter_map(|(i, p)| p.map(|p| (i, p))).collect();
+    let feeders: Vec<(f32, f32)> = graph
+        .pairs
+        .iter()
+        .filter(|(_, si)| graph.sinks[*si].node == v)
+        .filter_map(|(s, _)| {
+            placed[s.node].map(|(x, y)| (x + graph.geoms[s.node].w, y + graph.geoms[s.node].out_off[s.pin]))
+        })
+        .collect();
+    let left = others.iter().map(|(_, p)| p.0).fold(f32::INFINITY, f32::min);
+    let left = if left.is_finite() { left } else { 120.0 };
+    let right = others.iter().map(|&(i, p)| p.0 + graph.geoms[i].w).fold(left, f32::max);
+    let lowest = |filter: &dyn Fn(usize) -> bool| {
+        others
+            .iter()
+            .filter(|(i, _)| filter(*i))
+            .map(|&(i, p)| p.1 + graph.geoms[i].h)
+            .fold(f32::NEG_INFINITY, f32::max)
+    };
+    let below = |y: f32| if y.is_finite() { y + 30.0 } else { TITLE_H };
+    let mid = g.in_off.first().copied().unwrap_or(g.h / 2.0);
+    let (mut x, mut y) = match &graph.kinds[v] {
+        _ if !feeders.is_empty() => {
+            let x = feeders.iter().map(|f| f.0).fold(f32::NEG_INFINITY, f32::max) + 70.0;
+            let y = feeders.iter().map(|f| f.1).sum::<f32>() / feeders.len() as f32 - mid;
+            (x, y)
+        }
+        NodeKind::Input { .. } => {
+            let inputs_x = others.iter().find(|(i, _)| *i < graph.nin).map(|(_, p)| p.0);
+            (inputs_x.unwrap_or(left - g.w - 120.0), below(lowest(&|i| i < graph.nin)))
+        }
+        NodeKind::Output { .. } => {
+            let outputs_x = others.iter().find(|(i, _)| *i >= graph.out_base).map(|(_, p)| p.0);
+            (outputs_x.unwrap_or(right + 80.0), below(lowest(&|i| i >= graph.out_base)))
+        }
+        _ => (left + 160.0, below(lowest(&|_| true))),
+    };
+    x = (x / 10.0).round() * 10.0;
+    y = (y / 10.0).round() * 10.0;
+    let overlaps = |x: f32, y: f32| {
+        others.iter().any(|&(i, (ox, oy))| {
+            let o = &graph.geoms[i];
+            x < ox + o.w + 10.0 && ox < x + g.w + 10.0 && y < oy + o.h + 10.0 && oy < y + g.h + 10.0
+        })
+    };
+    while overlaps(x, y) {
+        y += 20.0;
+    }
+    (x, y)
+}
+
+/// Routes wires between freely placed boxes: a vertical trunk between the
+/// source and its nearest target, with wires that run backwards detouring
+/// underneath both boxes.
+fn route_free(graph: &Graph, positions: &[(f32, f32)]) -> BTreeMap<Source, Vec<[f32; 4]>> {
+    let mut by_source: BTreeMap<Source, Vec<usize>> = BTreeMap::new();
+    for &(source, si) in &graph.pairs {
+        by_source.entry(source).or_default().push(si);
+    }
+    let mut trunks: Vec<(f32, f32, f32)> = Vec::new();
+    let mut segments: BTreeMap<Source, Vec<[f32; 4]>> = BTreeMap::new();
+    let mut detours = 0;
+    for (source, sink_indexes) in by_source {
+        let (sx, sy) = graph.out_pin(positions, source);
+        let mut forward = Vec::new();
+        let mut backward = Vec::new();
+        for si in sink_indexes {
+            let sink = &graph.sinks[si];
+            let (tx, ty) = graph.in_pin(positions, sink.node, sink.pin);
+            if tx >= sx + 24.0 { forward.push((tx, ty)) } else { backward.push((sink.node, tx, ty)) }
+        }
+        let segs = segments.entry(source).or_default();
+        if let [(tx, ty)] = forward.as_slice()
+            && (ty - sy).abs() < 0.5
+        {
+            segs.push([sx, sy, *tx, sy]);
+        } else if !forward.is_empty() {
+            let nearest = forward.iter().map(|f| f.0).fold(f32::INFINITY, f32::min);
+            let lo = forward.iter().map(|f| f.1).fold(sy, f32::min);
+            let hi = forward.iter().map(|f| f.1).fold(sy, f32::max);
+            let desired = sx + ((nearest - sx) / 2.0).max(14.0);
+            let x = pick_channel(&mut trunks, desired, lo, hi, sx + 8.0, nearest - 8.0);
+            segs.push([sx, sy, x, sy]);
+            for &(tx, ty) in &forward {
+                segs.push([x, sy, x, ty]);
+                segs.push([x, ty, tx, ty]);
+            }
+        }
+        for (node, tx, ty) in backward {
+            let bottom = |n: usize| positions[n].1 + graph.geoms[n].h;
+            let detour_y = bottom(source.node).max(bottom(node)) + 20.0 + detours as f32 * 10.0;
+            detours += 1;
+            let x1 = pick_channel(&mut trunks, sx + 14.0, sy, detour_y, sx + 6.0, sx + 60.0);
+            let x2 = pick_channel(&mut trunks, tx - 14.0, ty, detour_y, tx - 60.0, tx - 6.0);
+            segs.extend([
+                [sx, sy, x1, sy],
+                [x1, sy, x1, detour_y],
+                [x1, detour_y, x2, detour_y],
+                [x2, detour_y, x2, ty],
+                [x2, ty, tx, ty],
+            ]);
+        }
+    }
+    segments
+}
+
+/// Finds an x for a vertical run near `desired` that doesn't sit on top of
+/// another wire's vertical run, and reserves it.
+fn pick_channel(trunks: &mut Vec<(f32, f32, f32)>, desired: f32, y1: f32, y2: f32, min_x: f32, max_x: f32) -> f32 {
+    let (lo, hi) = (y1.min(y2), y1.max(y2));
+    let desired = (desired / 2.0).round() * 2.0;
+    let clash =
+        |x: f32| trunks.iter().any(|&(tx, tlo, thi)| (tx - x).abs() < 8.0 && tlo <= hi + 6.0 && lo <= thi + 6.0);
+    let mut chosen = desired;
+    for k in 0..40 {
+        let step = (k + 1) / 2;
+        let x = desired + step as f32 * if k % 2 == 1 { 10.0 } else { -10.0 };
+        if (x < min_x || x > max_x) && k > 0 {
+            continue;
+        }
+        if !clash(x) {
+            chosen = x;
+            break;
+        }
+    }
+    trunks.push((chosen, lo, hi));
+    chosen
+}
+
+impl Schematic {
+    /// Moves everything by (dx, dy).
+    pub fn translate(&mut self, dx: f32, dy: f32) {
+        for node in &mut self.nodes {
+            node.x += dx;
+            node.y += dy;
+            for pin in node.inputs.iter_mut().chain(&mut node.outputs) {
+                pin.x += dx;
+                pin.y += dy;
+            }
+        }
+        for wire in &mut self.wires {
+            for seg in &mut wire.segments {
+                *seg = [seg[0] + dx, seg[1] + dy, seg[2] + dx, seg[3] + dy];
+            }
+            for dot in &mut wire.dots {
+                *dot = (dot.0 + dx, dot.1 + dy);
+            }
+            wire.label_at = wire.label_at.map(|(x, y)| (x + dx, y + dy));
+        }
+        for tag in &mut self.tags {
+            tag.x += dx;
+            tag.y += dy;
+        }
+        self.width += dx;
+        self.height += dy;
+    }
+
+    /// Shifts a freely arranged schematic so it starts just below the title
+    /// with room for labels, and sizes the image to fit.
+    pub fn fit(&mut self) {
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for node in &self.nodes {
+            let (left, right) = match &node.kind {
+                NodeKind::Input { name, width } => (port_label(name, *width).len() as f32 * CHAR_W + 12.0, 0.0),
+                NodeKind::Output { name, width } => (0.0, port_label(name, *width).len() as f32 * CHAR_W + 12.0),
+                _ => (0.0, 0.0),
+            };
+            min_x = min_x.min(node.x - left);
+            max_x = max_x.max(node.x + node.w + right);
+            min_y = min_y.min(node.y - 18.0);
+            max_y = max_y.max(node.y + node.h);
+        }
+        for seg in self.wires.iter().flat_map(|w| &w.segments) {
+            min_x = min_x.min(seg[0].min(seg[2]));
+            max_x = max_x.max(seg[0].max(seg[2]));
+            min_y = min_y.min(seg[1].min(seg[3]));
+            max_y = max_y.max(seg[1].max(seg[3]));
+        }
+        if !min_x.is_finite() {
+            return;
+        }
+        let (dx, dy) = (MARGIN - min_x, TITLE_H - 16.0 - min_y);
+        self.translate(dx, dy);
+        self.width = max_x + dx + MARGIN;
+        self.height = max_y + dy + MARGIN;
+    }
 }
 
 /// Depth-first search from the inputs. Returns nodes in topological order
@@ -706,11 +1004,9 @@ impl Resolver<'_> {
     /// What an expression is wired to.
     fn resolve(&self, expr: &Expr, depth: usize) -> Vec<Part> {
         match &expr.kind {
-            ExprKind::Literal(_) => vec![Part {
-                source: None,
-                constant: Some(self.sources.slice(expr.span).to_string()),
-                label: None,
-            }],
+            ExprKind::Literal(_) => {
+                vec![Part { source: None, constant: Some(self.sources.slice(expr.span).to_string()), label: None }]
+            }
             ExprKind::Concat(parts) => parts.iter().flat_map(|p| self.resolve(p, depth)).collect(),
             ExprKind::Ref { base, port, select } => {
                 let mut parts = match self.info.names.get(&base.name) {

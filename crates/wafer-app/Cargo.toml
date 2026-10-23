@@ -1,0 +1,18 @@
+[package]
+name = "wafer-app"
+description = "The Wafer desktop app: a canvas for designing and simulating chips"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "wafer-app"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.36"
+egui = "0.36"
+egui_dock = "0.21.1"
+wafer-core = { path = "../wafer-core" }
+
+[dev-dependencies]
+egui_kittest = { version = "0.36", features = ["eframe", "wgpu", "snapshot"] }

@@ -20,11 +20,7 @@ impl Span {
 
     /// The smallest span covering both.
     pub fn to(self, other: Span) -> Span {
-        Span {
-            file: self.file,
-            start: self.start.min(other.start),
-            end: self.end.max(other.end),
-        }
+        Span { file: self.file, start: self.start.min(other.start), end: self.end.max(other.end) }
     }
 }
 
@@ -36,9 +32,7 @@ pub struct SourceFile {
 
 impl SourceFile {
     pub fn new(path: PathBuf, text: String) -> SourceFile {
-        let line_starts = std::iter::once(0)
-            .chain(text.match_indices('\n').map(|(i, _)| i + 1))
-            .collect();
+        let line_starts = std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1)).collect();
         SourceFile { path, text, line_starts }
     }
 
@@ -56,10 +50,7 @@ impl SourceFile {
     /// The text of a 1-based line, without its newline.
     pub fn line_text(&self, line: usize) -> &str {
         let start = self.line_starts[line - 1];
-        let end = self
-            .line_starts
-            .get(line)
-            .map_or(self.text.len(), |&next| next - 1);
+        let end = self.line_starts.get(line).map_or(self.text.len(), |&next| next - 1);
         self.text[start..end].trim_end_matches('\r')
     }
 }
@@ -116,13 +107,7 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     pub fn error(span: Span, message: impl Into<String>) -> Diagnostic {
-        Diagnostic {
-            severity: Severity::Error,
-            message: message.into(),
-            span,
-            label: None,
-            notes: Vec::new(),
-        }
+        Diagnostic { severity: Severity::Error, message: message.into(), span, label: None, notes: Vec::new() }
     }
 
     pub fn warning(span: Span, message: impl Into<String>) -> Diagnostic {
@@ -169,20 +154,10 @@ impl Diagnostic {
 
         let mut out = String::new();
         let _ = writeln!(out, "{}: {}", paint(code, kind), paint("1", &self.message));
-        let _ = writeln!(
-            out,
-            "{pad}{} {}:{line}:{col}",
-            paint("1;34", "-->"),
-            display_path(&file.path)
-        );
+        let _ = writeln!(out, "{pad}{} {}:{line}:{col}", paint("1;34", "-->"), display_path(&file.path));
         let _ = writeln!(out, "{pad} {bar}");
         let _ = writeln!(out, "{} {bar} {text}", paint("1;34", &number));
-        let _ = writeln!(
-            out,
-            "{pad} {bar} {}{}",
-            " ".repeat(col - 1),
-            paint(code, &format!("{marks}{label}"))
-        );
+        let _ = writeln!(out, "{pad} {bar} {}{}", " ".repeat(col - 1), paint(code, &format!("{marks}{label}")));
         for note in &self.notes {
             let _ = writeln!(out, "{pad} {} note: {note}", paint("1;34", "="));
         }
@@ -243,8 +218,7 @@ mod tests {
         let text = "chip A {\n  x = Xro(a, b)\n}\n";
         let file = sources.add("A.chip".into(), text.into());
         let start = text.find("Xro").unwrap();
-        let d = Diagnostic::error(Span::new(file, start, start + 3), "unknown chip `Xro`")
-            .label("did you mean `Xor`?");
+        let d = Diagnostic::error(Span::new(file, start, start + 3), "unknown chip `Xro`").label("did you mean `Xor`?");
         let out = d.render(&sources, false);
         assert!(out.contains("A.chip:2:7"), "{out}");
         assert!(out.contains("      ^^^ did you mean `Xor`?"), "{out}");

@@ -33,8 +33,7 @@ impl Project {
     }
 
     pub fn from_sources(sources: Vec<(PathBuf, String)>) -> Project {
-        let mut project =
-            Project { sources: SourceMap::default(), files: Vec::new(), diagnostics: Vec::new() };
+        let mut project = Project { sources: SourceMap::default(), files: Vec::new(), diagnostics: Vec::new() };
         for (path, text) in sources {
             let id = project.sources.add(path, text);
             let file = parse(id, &project.sources.get(id).text, &mut project.diagnostics);

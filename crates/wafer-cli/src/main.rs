@@ -8,6 +8,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use wafer_core::diag::{display_path, suggest};
+use wafer_core::layout_file::LayoutFile;
 use wafer_core::logic::{Logic, bits_from_u64, format_bits};
 use wafer_core::testing::{self, MAX_STEPS};
 use wafer_core::{Design, Diagnostic, Netlist, Project, Simulator, schematic, svg};
@@ -140,7 +141,8 @@ fn test(project: &Project, design: &Design, only: &[String], errors: usize, ui: 
             chips_failed += 1;
             continue;
         }
-        let outcomes: Vec<_> = design.tests.iter().filter(|t| &t.chip == name).map(|t| testing::run_test(design, t)).collect();
+        let outcomes: Vec<_> =
+            design.tests.iter().filter(|t| &t.chip == name).map(|t| testing::run_test(design, t)).collect();
         let builtin = testing::check_against_builtin(design, name);
         if outcomes.is_empty() && builtin.is_none() {
             println!("{} {}", ui.dim("·"), ui.dim(&format!("{padded}  no tests yet")));
@@ -183,10 +185,19 @@ fn test(project: &Project, design: &Design, only: &[String], errors: usize, ui: 
             } else if check.mismatches.is_empty() {
                 summary.push(format!("matches built-in {gate}"));
             } else {
-                summary.push(format!("differs from built-in {gate} in {} of {} cases", check.mismatches.len(), check.cases));
+                summary.push(format!(
+                    "differs from built-in {gate} in {} of {} cases",
+                    check.mismatches.len(),
+                    check.cases
+                ));
                 for m in &check.mismatches {
                     let inputs: Vec<String> = m.inputs.iter().map(Logic::to_string).collect();
-                    details.push(format!("inputs {} → built-in gives {}, yours gives {}", inputs.join(" "), m.expected, m.actual));
+                    details.push(format!(
+                        "inputs {} → built-in gives {}, yours gives {}",
+                        inputs.join(" "),
+                        m.expected,
+                        m.actual
+                    ));
                 }
             }
         }
@@ -238,7 +249,8 @@ fn simulate(design: &Design, chip: &str, sets: &[String]) -> Result<Run, String>
         let inputs = &sim.netlist().inputs;
         let Some(index) = inputs.iter().position(|s| s.path == name) else {
             let names: Vec<&str> = inputs.iter().map(|s| s.path.as_str()).collect();
-            let hint = suggest(name, names.iter().copied()).map(|s| format!(" (did you mean `{s}`?)")).unwrap_or_default();
+            let hint =
+                suggest(name, names.iter().copied()).map(|s| format!(" (did you mean `{s}`?)")).unwrap_or_default();
             return Err(format!("`{chip}` has no input `{name}`{hint}; its inputs are {}", names.join(", ")));
         };
         let width = inputs[index].nets.len();
@@ -293,7 +305,14 @@ fn sim(design: &Design, chip: &str, sets: &[String], all: bool, ui: &Ui) -> Exit
     let netlist = sim.netlist();
     let is_port = |path: &str| netlist.inputs.iter().chain(&netlist.outputs).any(|p| p.path == path);
     let inside: Vec<_> = netlist.signals.iter().filter(|s| !is_port(&s.path) && (all || s.depth == 0)).collect();
-    let width = netlist.inputs.iter().chain(&netlist.outputs).chain(inside.iter().copied()).map(|s| s.path.len()).max().unwrap_or(0);
+    let width = netlist
+        .inputs
+        .iter()
+        .chain(&netlist.outputs)
+        .chain(inside.iter().copied())
+        .map(|s| s.path.len())
+        .max()
+        .unwrap_or(0);
     let line = |path: &str, nets: &[u32]| format!("  {path:<width$}  {}", format_bits(&sim.values(nets)));
     println!("\n{}", ui.dim("inputs"));
     for s in &netlist.inputs {
@@ -315,9 +334,30 @@ fn sim(design: &Design, chip: &str, sets: &[String], all: bool, ui: &Ui) -> Exit
     if settled.is_ok() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
 }
 
-fn render(project: &Project, design: &Design, chip: &str, sets: &[String], output: Option<PathBuf>, ui: &Ui) -> ExitCode {
-    let Some(layout) = schematic::layout(design, &project.sources, chip) else {
-        let hint = suggest(chip, design.chips.keys().map(String::as_str)).map(|s| format!(" (did you mean `{s}`?)")).unwrap_or_default();
+fn render(
+    project: &Project,
+    design: &Design,
+    chip: &str,
+    sets: &[String],
+    output: Option<PathBuf>,
+    ui: &Ui,
+) -> ExitCode {
+    // Use the positions saved by the app, if there are any.
+    let saved = design.chips.get(chip).and_then(|info| {
+        let path = LayoutFile::path_for(&project.sources.get(info.span.file).path);
+        LayoutFile::load(&path).ok()?.positions(chip)
+    });
+    let layout = match saved {
+        Some(positions) => schematic::arrange(design, &project.sources, chip, &positions).map(|mut s| {
+            s.fit();
+            s
+        }),
+        None => schematic::layout(design, &project.sources, chip),
+    };
+    let Some(layout) = layout else {
+        let hint = suggest(chip, design.chips.keys().map(String::as_str))
+            .map(|s| format!(" (did you mean `{s}`?)"))
+            .unwrap_or_default();
         eprintln!("{} there's no chip named `{chip}`{hint}", ui.fail("error:"));
         return ExitCode::FAILURE;
     };
@@ -340,10 +380,11 @@ fn render(project: &Project, design: &Design, chip: &str, sets: &[String], outpu
 
     let output = output.unwrap_or_else(|| PathBuf::from("renders").join(format!("{chip}.png")));
     if let Some(dir) = output.parent().filter(|d| !d.as_os_str().is_empty())
-        && let Err(e) = std::fs::create_dir_all(dir) {
-            eprintln!("{} can't create {}: {e}", ui.fail("error:"), dir.display());
-            return ExitCode::FAILURE;
-        }
+        && let Err(e) = std::fs::create_dir_all(dir)
+    {
+        eprintln!("{} can't create {}: {e}", ui.fail("error:"), dir.display());
+        return ExitCode::FAILURE;
+    }
     let saved = if output.extension().is_some_and(|e| e == "svg") {
         std::fs::write(&output, &svg_text).map_err(|e| e.to_string())
     } else {

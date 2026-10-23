@@ -4,12 +4,40 @@ A "Blender for computer chips": design digital chips from gates, simulate
 them one gate delay at a time, and test them. See [PLANNING.md](PLANNING.md)
 for the vision, the decisions so far, and the roadmap.
 
-Milestone 1a, the engine and the `wafer` command, is done. The desktop app
-comes next.
+Milestones 1a (the engine and the `wafer` command) and 1b (the desktop app
+with its canvas) are done.
 
-## Try it
+## The app
 
 You need Rust (`rustup`). From this folder:
+
+```bash
+cargo app
+```
+
+It opens `chips/` (pass another folder to open that instead). The canvas
+edits the `.chip` files directly, and it reloads within half a second when
+anything else changes them, so you can edit text and boxes side by side.
+
+| Key | Does |
+|---|---|
+| Shift+A | Add a gate, chip, input or output (type to search) |
+| Drag from a pin | Draw a wire to another pin |
+| Click an input | Flip it between 0 and 1 |
+| Drag / G | Move the selection (G: it follows the pointer; click to drop) |
+| Shift+D | Duplicate |
+| X or Delete | Delete the selected boxes or wire |
+| F | Frame everything |
+| Space / → | Play-pause / step one gate delay |
+| Cmd+Z / Cmd+Shift+Z | Undo / redo |
+| Two-finger drag / pinch | Pan / zoom |
+
+Rename things in the Inspector. Positions are saved in `Name.layout.json`
+next to each `.chip` file.
+
+## The `wafer` command
+
+From this folder:
 
 ```bash
 cargo wafer -p chips test
@@ -59,4 +87,5 @@ slice, and `{hi, lo}` to join buses. PLANNING.md has the full format.
 |---|---|
 | `crates/wafer-core` | The engine: parser, checker, netlist, simulator, test runner, schematic layout and SVG drawing. No UI code. |
 | `crates/wafer-cli` | The `wafer` command |
+| `crates/wafer-app` | The desktop app: canvas, panels, live simulation. UI tests in `tests/ui.rs` drive it with simulated input. |
 | `chips/` | Our chips: gates built from Nand up to a 4-bit adder and a latch |

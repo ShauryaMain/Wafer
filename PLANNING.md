@@ -192,12 +192,21 @@ Rules:
     - Auto-layout gets busy on bus-heavy chips like Add4, and two different wires can briefly run along the same line.
     - Tests are truth tables only; `set` / `tick` / `expect` steps come with the clock in Phase 2.
     - Shared wires (`<-`) and loops aren't parsed yet.
-- **1b, Canvas.**
+- **1b, Canvas. ✅ Done 2026-10-24.**
   - App shell in the Blender classic layout.
   - Canvas: pan, zoom, add/move/delete/duplicate, right-angle wires, box select, buses drawn thick with value labels.
   - Switches and lamps, live wire colors, play/pause/step and a speed slider.
   - Undo/redo. Saving `.chip` and `.layout.json`, live reload with last-good fallback, auto-layout, a Run tests button.
   - *Done when:* you build the half adder on the canvas and its tests pass.
+  - Verified by a UI test that builds a half adder from an empty chip with simulated mouse and keyboard input, and checks the file text and test results.
+  - Changes from the plan:
+    - Unconnected inputs and undriven outputs are now warnings (they read as Z), so half-built chips still simulate.
+    - The canvas draws through egui's painter, which runs on wgpu. A custom wgpu pipeline waits until big chips need it.
+    - Tests re-run automatically whenever the chip changes; the button is still there.
+  - Not yet:
+    - Dragging individual wire segments.
+    - Cmd+K command search.
+    - A router that steers wires around boxes (wires can cross boxes after you move things; move the box to tidy up).
 - **1c, Text & time.**
   - Editable code panel synced with the canvas.
   - Waveform timeline showing every signal over time steps, with scrubbing.
@@ -230,4 +239,5 @@ Verilog export, Yosys synthesis, real gate counts, 3D layer viewer, FPGA, maybe 
 
 - Mac: Apple Silicon, macOS 26.6.2. git installed.
 - Rust: installed (cargo 1.99.1 in `~/.cargo/bin`).
-- Git repo initialized on `main`. `cargo wafer ...` runs the CLI from the repo root.
+- Git repo initialized on `main`. `cargo wafer ...` runs the CLI and `cargo app` opens the desktop app, both from the repo root.
+- App stack pinned to egui/eframe 0.36 because egui_dock 0.21 hasn't caught up with egui 0.37 yet.

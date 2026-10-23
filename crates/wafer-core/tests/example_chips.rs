@@ -11,12 +11,8 @@ fn example_chips_pass() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../chips");
     let project = Project::load(&dir).expect("chips/ is readable");
     let design = Design::check(&project);
-    let problems: Vec<String> = project
-        .diagnostics
-        .iter()
-        .chain(&design.diagnostics)
-        .map(|d| d.render(&project.sources, false))
-        .collect();
+    let problems: Vec<String> =
+        project.diagnostics.iter().chain(&design.diagnostics).map(|d| d.render(&project.sources, false)).collect();
     assert!(problems.is_empty(), "{}", problems.join("\n"));
     assert!(!design.tests.is_empty());
 

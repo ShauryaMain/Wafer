@@ -73,13 +73,8 @@ impl Netlist {
         if !design.is_buildable(chip) {
             return Err(BuildError::HasErrors(chip.into()));
         }
-        let mut b = Builder {
-            design,
-            parent: Vec::new(),
-            gates: Vec::new(),
-            constants: Vec::new(),
-            signals: Vec::new(),
-        };
+        let mut b =
+            Builder { design, parent: Vec::new(), gates: Vec::new(), constants: Vec::new(), signals: Vec::new() };
         let inputs: Vec<Vec<NetId>> = info.inputs.iter().map(|p| b.fresh(p.width)).collect();
         let outputs: Vec<Vec<NetId>> = info.outputs.iter().map(|p| b.fresh(p.width)).collect();
         b.instantiate(chip, "", &inputs, &outputs, 0)?;
@@ -96,7 +91,11 @@ impl Netlist {
         }
         let map = |net: NetId| compact[roots[net as usize] as usize];
         let map_signal = |s: &Signal| Signal { nets: s.nets.iter().map(|&n| map(n)).collect(), ..s.clone() };
-        let signal = |name: &str, nets: &[NetId]| Signal { path: name.into(), nets: nets.iter().map(|&n| map(n)).collect(), depth: 0 };
+        let signal = |name: &str, nets: &[NetId]| Signal {
+            path: name.into(),
+            nets: nets.iter().map(|&n| map(n)).collect(),
+            depth: 0,
+        };
 
         // A chip's outputs are named both from outside (`h1.sum`) and from
         // inside it (its port `sum`, also `h1.sum`). Keep the outer one.
@@ -255,7 +254,11 @@ impl Builder<'_> {
                 .inputs
                 .iter()
                 .zip(&sig.inputs)
-                .map(|(expr, (_, width))| self.resolve(&scope, expr.as_ref().expect("checked"), Some(*width)))
+                .map(|(expr, (_, width))| match expr {
+                    Some(expr) => self.resolve(&scope, expr, Some(*width)),
+                    // Unconnected: nets nothing drives, so they read as Z.
+                    None => self.fresh(*width),
+                })
                 .collect();
             match &inst.callee {
                 Callee::Gate { kind, width } => {

@@ -63,8 +63,7 @@ impl Parser<'_> {
 
     fn error_here(&mut self, expected: &str) {
         let found = self.peek().describe();
-        self.diags
-            .push(Diagnostic::error(self.span(), format!("expected {expected}, found {found}")));
+        self.diags.push(Diagnostic::error(self.span(), format!("expected {expected}, found {found}")));
     }
 
     fn expect(&mut self, tok: &Tok, expected: &str) -> PResult<Span> {
@@ -184,8 +183,7 @@ impl Parser<'_> {
                 }
                 Tok::Eof => {
                     self.diags.push(
-                        Diagnostic::error(chip.name.span, "this chip is missing its closing `}`")
-                            .label("opened here"),
+                        Diagnostic::error(chip.name.span, "this chip is missing its closing `}`").label("opened here"),
                     );
                     return Ok(chip);
                 }
@@ -232,9 +230,7 @@ impl Parser<'_> {
                 let (bits, bits_span) = self.number("a bus width, like `[8]`")?;
                 let close = self.expect(&Tok::RBracket, "`]`")?;
                 if bits == 0 || bits > 4096 {
-                    self.diags.push(
-                        Diagnostic::error(bits_span, "a bus needs between 1 and 4096 bits"),
-                    );
+                    self.diags.push(Diagnostic::error(bits_span, "a bus needs between 1 and 4096 bits"));
                     return Err(());
                 }
                 width = bits as usize;
@@ -345,10 +341,8 @@ impl Parser<'_> {
         let close = self.expect(&Tok::RBracket, "`]`")?;
         let span = open.to(close);
         if hi < lo {
-            self.diags.push(
-                Diagnostic::error(span, "bit ranges go from high to low")
-                    .label(format!("try `[{lo}:{hi}]`")),
-            );
+            self.diags
+                .push(Diagnostic::error(span, "bit ranges go from high to low").label(format!("try `[{lo}:{hi}]`")));
             return Err(());
         }
         Ok(Select { hi: hi as usize, lo: lo as usize, span })
@@ -367,8 +361,7 @@ impl Parser<'_> {
                 }
                 Tok::Eof => {
                     self.diags.push(
-                        Diagnostic::error(test.chip.span, "this test is missing its closing `}`")
-                            .label("opened here"),
+                        Diagnostic::error(test.chip.span, "this test is missing its closing `}`").label("opened here"),
                     );
                     return Ok(test);
                 }
@@ -421,20 +414,16 @@ impl Parser<'_> {
                 .iter()
                 .filter_map(|t| {
                     let kind = match &t.tok {
-                        Tok::Number { value, digits_width } => TestValueKind::Number(Literal {
-                            value: *value,
-                            digits_width: *digits_width,
-                        }),
+                        Tok::Number { value, digits_width } => {
+                            TestValueKind::Number(Literal { value: *value, digits_width: *digits_width })
+                        }
                         Tok::Ident(name) if name == "x" || name == "X" => TestValueKind::X,
                         Tok::Ident(name) if name == "z" || name == "Z" => TestValueKind::Z,
                         Tok::Star => TestValueKind::Any,
                         other => {
                             self.diags.push(Diagnostic::error(
                                 t.span,
-                                format!(
-                                    "expected a value (a number, X, Z or *), found {}",
-                                    other.describe()
-                                ),
+                                format!("expected a value (a number, X, Z or *), found {}", other.describe()),
                             ));
                             return None;
                         }

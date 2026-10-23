@@ -14,15 +14,8 @@ pub enum GateKind {
 }
 
 impl GateKind {
-    pub const ALL: [GateKind; 7] = [
-        GateKind::Nand,
-        GateKind::And,
-        GateKind::Or,
-        GateKind::Not,
-        GateKind::Xor,
-        GateKind::Nor,
-        GateKind::Xnor,
-    ];
+    pub const ALL: [GateKind; 7] =
+        [GateKind::Nand, GateKind::And, GateKind::Or, GateKind::Not, GateKind::Xor, GateKind::Nor, GateKind::Xnor];
 
     pub fn name(self) -> &'static str {
         match self {

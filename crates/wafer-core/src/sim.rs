@@ -210,10 +210,8 @@ mod tests {
 
     #[test]
     fn nand_latch_holds_its_value() {
-        let mut sim = simulator(
-            "chip Latch {\n in s_n, r_n\n out q, q_n\n q = Nand(s_n, q_n)\n q_n = Nand(r_n, q)\n}",
-            "Latch",
-        );
+        let mut sim =
+            simulator("chip Latch {\n in s_n, r_n\n out q, q_n\n q = Nand(s_n, q_n)\n q_n = Nand(r_n, q)\n}", "Latch");
         sim.set_input(0, &[Zero]);
         sim.set_input(1, &[One]);
         sim.settle(100).unwrap();

@@ -85,7 +85,11 @@ pub struct Expr {
 #[derive(Clone, Debug)]
 pub enum ExprKind {
     /// `a`, `fa0.sum`, `a[3]`, `fa0.sum[7:4]`
-    Ref { base: Ident, port: Option<Ident>, select: Option<Select> },
+    Ref {
+        base: Ident,
+        port: Option<Ident>,
+        select: Option<Select>,
+    },
     Literal(Literal),
     /// `{hi, lo}`: parts are listed most significant first.
     Concat(Vec<Expr>),

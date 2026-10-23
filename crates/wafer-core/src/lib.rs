@@ -16,7 +16,9 @@
 pub mod ast;
 pub mod check;
 pub mod diag;
+pub mod edit;
 pub mod gate;
+pub mod layout_file;
 pub mod lexer;
 pub mod logic;
 pub mod netlist;

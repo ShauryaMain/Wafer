@@ -88,9 +88,7 @@ impl fmt::Display for Logic {
 
 /// The bits of `value`, lowest bit first.
 pub fn bits_from_u64(value: u64, width: usize) -> Vec<Logic> {
-    (0..width)
-        .map(|i| Logic::from_bool(i < 64 && (value >> i) & 1 == 1))
-        .collect()
+    (0..width).map(|i| Logic::from_bool(i < 64 && (value >> i) & 1 == 1)).collect()
 }
 
 /// The number a bus holds, if every bit is 0 or 1 and it fits in 64 bits.

@@ -65,7 +65,10 @@ pub struct Instance {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Callee {
     /// A built-in gate, repeated once per bit when its inputs are buses.
-    Gate { kind: GateKind, width: usize },
+    Gate {
+        kind: GateKind,
+        width: usize,
+    },
     Chip(String),
     Unknown,
 }
@@ -140,10 +143,7 @@ impl Design {
         }
         find_recursion(&mut chips, &mut diags);
 
-        let tests = project
-            .tests()
-            .filter_map(|def| check_test(def, &chips, &mut diags))
-            .collect();
+        let tests = project.tests().filter_map(|def| check_test(def, &chips, &mut diags)).collect();
         Design { chips, tests, diagnostics: diags }
     }
 
@@ -229,10 +229,7 @@ fn declare(def: &ast::ChipDef, diags: &mut Vec<Diagnostic>) -> ChipInfo {
     for (decls, group) in groups {
         for decl in decls {
             if info.names.contains_key(&decl.name.name) {
-                diags.push(Diagnostic::error(
-                    decl.name.span,
-                    format!("`{}` is declared twice", decl.name.name),
-                ));
+                diags.push(Diagnostic::error(decl.name.span, format!("`{}` is declared twice", decl.name.name)));
                 info.has_errors = true;
                 continue;
             }
@@ -290,15 +287,14 @@ impl BodyCheck<'_> {
             ),
             (StmtValue::Call(call), Some(driven @ (Name::Output(_) | Name::Wire(_)))) => {
                 if let Some(select) = stmt.select {
-                    self.error(
-                        Diagnostic::error(select.span, "a gate's output can't drive part of a bus")
-                            .note(format!(
-                                "give the gate its own name, then connect it: `s = {}(...)` and `{}{} = s`",
-                                call.chip.name,
-                                target.name,
-                                bit_text(&select)
-                            )),
-                    );
+                    self.error(Diagnostic::error(select.span, "a gate's output can't drive part of a bus").note(
+                        format!(
+                            "give the gate its own name, then connect it: `s = {}(...)` and `{}{} = s`",
+                            call.chip.name,
+                            target.name,
+                            bit_text(&select)
+                        ),
+                    ));
                     return;
                 }
                 let instance = self.new_instance(call, &target.name, Some(driven), stmt.span);
@@ -332,12 +328,7 @@ impl BodyCheck<'_> {
                 self.wire_widths.push(None);
                 let wire = Name::Wire(self.info.wires.len() - 1);
                 self.info.names.insert(target.name.clone(), wire);
-                self.info.assigns.push(Assign {
-                    target: wire,
-                    select: None,
-                    value: value.clone(),
-                    span: stmt.span,
-                });
+                self.info.assigns.push(Assign { target: wire, select: None, value: value.clone(), span: stmt.span });
             }
         }
     }
@@ -385,36 +376,34 @@ impl BodyCheck<'_> {
                     }
                 }
                 None if named_seen => {
-                    self.error(Diagnostic::error(
-                        arg.value.span,
-                        "unnamed inputs have to come before named ones",
-                    ));
+                    self.error(Diagnostic::error(arg.value.span, "unnamed inputs have to come before named ones"));
                     continue;
                 }
                 None if position >= ports.len() => {
                     self.error(
-                        Diagnostic::error(arg.value.span, format!("`{chip}` only has {} input{}", ports.len(), plural(ports.len())))
-                            .note(format!("its inputs are {}", list(&ports))),
+                        Diagnostic::error(
+                            arg.value.span,
+                            format!("`{chip}` only has {} input{}", ports.len(), plural(ports.len())),
+                        )
+                        .note(format!("its inputs are {}", list(&ports))),
                     );
                     continue;
                 }
                 None => position,
             };
             if slots[slot].is_some() {
-                self.error(Diagnostic::error(
-                    arg.value.span,
-                    format!("input `{}` is connected twice", ports[slot]),
-                ));
+                self.error(Diagnostic::error(arg.value.span, format!("input `{}` is connected twice", ports[slot])));
                 continue;
             }
             slots[slot] = Some(arg.value.clone());
         }
         let missing: Vec<String> =
             ports.iter().zip(&slots).filter(|(_, s)| s.is_none()).map(|(p, _)| p.clone()).collect();
+        // Unconnected inputs are allowed while you're still wiring things up.
         if !missing.is_empty() {
             self.error(
-                Diagnostic::error(call.span, format!("`{chip}` is missing input{} {}", plural(missing.len()), list(&missing)))
-                    .note("every input has to be connected"),
+                Diagnostic::warning(call.span, format!("`{name}` has nothing connected to {}", list(&missing)))
+                    .note("unconnected inputs read as Z"),
             );
         }
         Instance { name: name.into(), callee, inputs: slots, drives, span }
@@ -479,10 +468,11 @@ impl BodyCheck<'_> {
             for i in 0..self.info.assigns.len() {
                 if let Name::Wire(w) = self.info.assigns[i].target
                     && self.wire_widths[w].is_none()
-                        && let Some(width) = self.quiet_width(&self.info.assigns[i].value, true) {
-                            self.wire_widths[w] = Some(width);
-                            changed = true;
-                        }
+                    && let Some(width) = self.quiet_width(&self.info.assigns[i].value, true)
+                {
+                    self.wire_widths[w] = Some(width);
+                    changed = true;
+                }
             }
             if !changed {
                 break;
@@ -560,8 +550,9 @@ impl BodyCheck<'_> {
                             None => {
                                 let callee = self.callee_name(i);
                                 let names: Vec<String> = outputs.iter().map(|(n, _)| n.clone()).collect();
-                                let mut d = Diagnostic::error(port.span, format!("`{callee}` has no output `{}`", port.name))
-                                    .note(format!("its outputs are {}", list(&names)));
+                                let mut d =
+                                    Diagnostic::error(port.span, format!("`{callee}` has no output `{}`", port.name))
+                                        .note(format!("its outputs are {}", list(&names)));
                                 if let Some(close) = suggest(&port.name, names.iter().map(String::as_str)) {
                                     d = d.label(format!("did you mean `{close}`?"));
                                 }
@@ -578,9 +569,12 @@ impl BodyCheck<'_> {
                             _ => {
                                 let names: Vec<String> = outputs.iter().map(|(n, _)| n.clone()).collect();
                                 self.error(
-                                    Diagnostic::error(base.span, format!("`{}` has {} outputs", base.name, names.len()))
-                                        .label(format!("pick one, like `{}.{}`", base.name, names[0]))
-                                        .note(format!("its outputs are {}", list(&names))),
+                                    Diagnostic::error(
+                                        base.span,
+                                        format!("`{}` has {} outputs", base.name, names.len()),
+                                    )
+                                    .label(format!("pick one, like `{}.{}`", base.name, names[0]))
+                                    .note(format!("its outputs are {}", list(&names))),
                                 );
                                 return None;
                             }
@@ -602,7 +596,9 @@ impl BodyCheck<'_> {
                         } else {
                             format!("`{}` only has bits {}..0", base.name, width - 1)
                         };
-                        self.error(Diagnostic::error(select.span, format!("bit {} is out of range", select.hi)).note(range));
+                        self.error(
+                            Diagnostic::error(select.span, format!("bit {} is out of range", select.hi)).note(range),
+                        );
                         None
                     }
                     Some(select) => Some(select.width()),
@@ -648,15 +644,16 @@ impl BodyCheck<'_> {
             for ((port, expected), expr) in sig.inputs.iter().zip(&instance.inputs) {
                 let Some(expr) = expr else { continue };
                 if let Some(width) = self.check_expr(expr, Some(*expected))
-                    && width != *expected {
-                        self.error(Diagnostic::error(
-                            expr.span,
-                            format!(
-                                "`{callee}` input `{port}` is {expected} bit{}, but this is {width}",
-                                plural(*expected)
-                            ),
-                        ));
-                    }
+                    && width != *expected
+                {
+                    self.error(Diagnostic::error(
+                        expr.span,
+                        format!(
+                            "`{callee}` input `{port}` is {expected} bit{}, but this is {width}",
+                            plural(*expected)
+                        ),
+                    ));
+                }
             }
             if let Some(target) = instance.drives {
                 let target_name = &instance.name;
@@ -665,7 +662,10 @@ impl BodyCheck<'_> {
                     [(_, width)] if *width != target_width => {
                         self.error(Diagnostic::error(
                             instance.span,
-                            format!("`{target_name}` is {target_width} bit{}, but `{callee}` outputs {width}", plural(target_width)),
+                            format!(
+                                "`{target_name}` is {target_width} bit{}, but `{callee}` outputs {width}",
+                                plural(target_width)
+                            ),
                         ));
                     }
                     [_] => {}
@@ -673,8 +673,11 @@ impl BodyCheck<'_> {
                         let first = outputs.first().map_or("out", |(n, _)| n.as_str());
                         let short = callee.to_lowercase();
                         self.error(
-                            Diagnostic::error(instance.span, format!("`{callee}` has {} outputs, so it needs a name of its own", outputs.len()))
-                                .note(format!("try `{short}1 = {callee}(...)`, then `{target_name} = {short}1.{first}`")),
+                            Diagnostic::error(
+                                instance.span,
+                                format!("`{callee}` has {} outputs, so it needs a name of its own", outputs.len()),
+                            )
+                            .note(format!("try `{short}1 = {callee}(...)`, then `{target_name} = {short}1.{first}`")),
                         );
                     }
                 }
@@ -699,12 +702,17 @@ impl BodyCheck<'_> {
             };
             let expected = bits.len();
             if let Some(width) = self.check_expr(&assign.value, Some(expected))
-                && width != expected {
-                    self.error(Diagnostic::error(
-                        assign.value.span,
-                        format!("`{target_name}{}` is {expected} bit{}, but this is {width}", assign.select.map(|s| bit_text(&s)).unwrap_or_default(), plural(expected)),
-                    ));
-                }
+                && width != expected
+            {
+                self.error(Diagnostic::error(
+                    assign.value.span,
+                    format!(
+                        "`{target_name}{}` is {expected} bit{}, but this is {width}",
+                        assign.select.map(|s| bit_text(&s)).unwrap_or_default(),
+                        plural(expected)
+                    ),
+                ));
+            }
             self.mark_driven(assign.target, bits, assign.span, &mut drivers);
         }
 
@@ -716,7 +724,7 @@ impl BodyCheck<'_> {
                 } else {
                     format!("bits {missing} of output `{}` are never driven", port.name)
                 };
-                self.error(Diagnostic::error(port.span, what).note("connect it to something, like `name = Gate(...)` or `name = other`"));
+                self.error(Diagnostic::warning(port.span, what).note("it reads as Z until something drives it"));
             }
         }
         for (i, wire) in self.info.wires.clone().iter().enumerate() {
@@ -738,7 +746,13 @@ impl BodyCheck<'_> {
         }
     }
 
-    fn mark_driven(&mut self, target: Name, bits: std::ops::Range<usize>, span: Span, drivers: &mut HashMap<Name, Vec<bool>>) {
+    fn mark_driven(
+        &mut self,
+        target: Name,
+        bits: std::ops::Range<usize>,
+        span: Span,
+        drivers: &mut HashMap<Name, Vec<bool>>,
+    ) {
         let flags = drivers.get_mut(&target).expect("outputs and wires are registered");
         let doubled: Vec<usize> = bits.clone().filter(|&b| flags[b]).collect();
         for b in bits {
@@ -863,12 +877,17 @@ fn check_test(def: &ast::TestDef, chips: &BTreeMap<String, ChipInfo>, diags: &mu
                 let mut found = Vec::new();
                 for ident in idents {
                     match ports.iter().position(|p| p.name == ident.name) {
-                        Some(i) if found.contains(&i) => diags.push(Diagnostic::error(ident.span, format!("`{}` is listed twice", ident.name))),
+                        Some(i) if found.contains(&i) => {
+                            diags.push(Diagnostic::error(ident.span, format!("`{}` is listed twice", ident.name)))
+                        }
                         Some(i) => found.push(i),
                         None => {
                             let names: Vec<String> = ports.iter().map(|p| p.name.clone()).collect();
-                            let mut d = Diagnostic::error(ident.span, format!("`{}` has no {kind} `{}`", chip.name, ident.name))
-                                .note(format!("its {kind}s are {}", list(&names)));
+                            let mut d = Diagnostic::error(
+                                ident.span,
+                                format!("`{}` has no {kind} `{}`", chip.name, ident.name),
+                            )
+                            .note(format!("its {kind}s are {}", list(&names)));
                             if let Some(close) = suggest(&ident.name, names.iter().map(String::as_str)) {
                                 d = d.label(format!("did you mean `{close}`?"));
                             }
@@ -892,7 +911,13 @@ fn check_test(def: &ast::TestDef, chips: &BTreeMap<String, ChipInfo>, diags: &mu
                     .collect();
                 diags.push(Diagnostic::error(
                     row.span,
-                    format!("expected {} {kind} value{} ({}), found {}", names.len(), plural(names.len()), names.join(" "), values.len()),
+                    format!(
+                        "expected {} {kind} value{} ({}), found {}",
+                        names.len(),
+                        plural(names.len()),
+                        names.join(" "),
+                        values.len()
+                    ),
                 ));
             }
         }
@@ -900,7 +925,16 @@ fn check_test(def: &ast::TestDef, chips: &BTreeMap<String, ChipInfo>, diags: &mu
             match v.kind {
                 TestValueKind::Number(lit) => {
                     if !lit.fits(port.width) {
-                        diags.push(Diagnostic::error(v.span, format!("{} doesn't fit in `{}` ({} bit{})", lit.value, port.name, port.width, plural(port.width))));
+                        diags.push(Diagnostic::error(
+                            v.span,
+                            format!(
+                                "{} doesn't fit in `{}` ({} bit{})",
+                                lit.value,
+                                port.name,
+                                port.width,
+                                plural(port.width)
+                            ),
+                        ));
                         return None;
                     }
                     Some(Some(bits_from_u64(lit.value, port.width)))
@@ -908,7 +942,10 @@ fn check_test(def: &ast::TestDef, chips: &BTreeMap<String, ChipInfo>, diags: &mu
                 TestValueKind::X => Some(Some(vec![Logic::X; port.width])),
                 TestValueKind::Z => Some(Some(vec![Logic::Z; port.width])),
                 TestValueKind::Any if is_input => {
-                    diags.push(Diagnostic::error(v.span, "inputs need a value").note("`*` (don't care) only works for outputs"));
+                    diags.push(
+                        Diagnostic::error(v.span, "inputs need a value")
+                            .note("`*` (don't care) only works for outputs"),
+                    );
                     None
                 }
                 TestValueKind::Any => Some(None),
@@ -920,12 +957,8 @@ fn check_test(def: &ast::TestDef, chips: &BTreeMap<String, ChipInfo>, diags: &mu
             .zip(&input_ports)
             .filter_map(|(v, &p)| value(v, &chip.inputs[p], true).flatten())
             .collect();
-        let outputs: Vec<Option<Vec<Logic>>> = row
-            .outputs
-            .iter()
-            .zip(&output_ports)
-            .filter_map(|(v, &p)| value(v, &chip.outputs[p], false))
-            .collect();
+        let outputs: Vec<Option<Vec<Logic>>> =
+            row.outputs.iter().zip(&output_ports).filter_map(|(v, &p)| value(v, &chip.outputs[p], false)).collect();
         rows.push(TestRowInfo { span: row.span, inputs, outputs });
     }
 
@@ -995,7 +1028,7 @@ mod tests {
     }
 
     #[test]
-    fn undriven_outputs_are_errors() {
+    fn undriven_outputs_are_reported() {
         let (_, messages) = check("chip A {\n in a\n out y[4]\n y[1:0] = {a, a}\n}");
         assert!(messages.iter().any(|m| m == "bits 3..2 of output `y` are never driven"), "{messages:?}");
     }

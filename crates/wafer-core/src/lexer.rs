@@ -7,7 +7,10 @@ pub enum Tok {
     Ident(String),
     /// `digits_width` is the width implied by the digits of a hex or binary
     /// literal (`0x0F` is 8 bits); decimal literals have none.
-    Number { value: u64, digits_width: Option<usize> },
+    Number {
+        value: u64,
+        digits_width: Option<usize>,
+    },
     LBrace,
     RBrace,
     LParen,
@@ -111,9 +114,7 @@ pub fn lex(file: FileId, text: &str, diags: &mut Vec<Diagnostic>) -> Vec<Token> 
                 }
                 let span = Span::new(file, start, i);
                 match parse_number(&text[start..i]) {
-                    Ok((value, digits_width)) => {
-                        tokens.push(Token { tok: Tok::Number { value, digits_width }, span })
-                    }
+                    Ok((value, digits_width)) => tokens.push(Token { tok: Tok::Number { value, digits_width }, span }),
                     Err(message) => diags.push(Diagnostic::error(span, message)),
                 }
             }
@@ -121,18 +122,12 @@ pub fn lex(file: FileId, text: &str, diags: &mut Vec<Diagnostic>) -> Vec<Token> 
                 while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                     i += 1;
                 }
-                tokens.push(Token {
-                    tok: Tok::Ident(text[start..i].to_string()),
-                    span: Span::new(file, start, i),
-                });
+                tokens.push(Token { tok: Tok::Ident(text[start..i].to_string()), span: Span::new(file, start, i) });
             }
             _ => {
                 let ch = text[i..].chars().next().unwrap_or('?');
                 i += ch.len_utf8();
-                diags.push(Diagnostic::error(
-                    Span::new(file, start, i),
-                    format!("unexpected character `{ch}`"),
-                ));
+                diags.push(Diagnostic::error(Span::new(file, start, i), format!("unexpected character `{ch}`")));
             }
         }
     }

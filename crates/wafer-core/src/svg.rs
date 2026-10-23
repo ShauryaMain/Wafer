@@ -72,7 +72,12 @@ fn port_colors(theme: &Theme, value: Option<&[Logic]>) -> (&'static str, &'stati
 
 /// Renders the schematic. `values` looks up a signal's current value by
 /// path; `subtitle` goes under the chip name.
-pub fn render(schematic: &Schematic, theme: &Theme, values: &dyn Fn(&str) -> Option<Vec<Logic>>, subtitle: &str) -> String {
+pub fn render(
+    schematic: &Schematic,
+    theme: &Theme,
+    values: &dyn Fn(&str) -> Option<Vec<Logic>>,
+    subtitle: &str,
+) -> String {
     let (w, h) = (schematic.width, schematic.height);
     let mut out = String::new();
     let _ = writeln!(
@@ -130,7 +135,15 @@ pub fn render(schematic: &Schematic, theme: &Theme, values: &dyn Fn(&str) -> Opt
                 } else {
                     port_box(&mut out, theme, x, y, node.w, *width, value.as_deref());
                 }
-                text(&mut out, x + node.w + 8.0, y + PORT_H / 2.0, 12.0, theme.text, "start", &port_label(name, *width));
+                text(
+                    &mut out,
+                    x + node.w + 8.0,
+                    y + PORT_H / 2.0,
+                    12.0,
+                    theme.text,
+                    "start",
+                    &port_label(name, *width),
+                );
             }
             NodeKind::Gate { name, kind } => {
                 gate(&mut out, theme, *kind, x, y);
