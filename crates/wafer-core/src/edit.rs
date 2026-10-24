@@ -94,10 +94,254 @@ pub fn apply(project: &Project, design: &Design, chip: &str, edit: &Edit) -> Res
     Ok(EditResult { file, text: editor.finish()?, renamed })
 }
 
-/// The first unused name like `nand1`, `nand2`, ...
+/// What [`extract_chip`] produces.
+pub struct Extracted {
+    /// The file holding the parent chip, and its new text.
+    pub parent_file: FileId,
+    pub parent_text: String,
+    /// The new chip's file text.
+    pub new_text: String,
+    /// The box that stands in for the selection in the parent.
+    pub instance: String,
+}
+
+/// "Make Chip": moves the `selected` boxes of `chip` into a new chip named
+/// `new_name`, and puts one box of the new chip in their place.
+///
+/// Every outside signal the boxes read becomes an input of the new chip.
+/// Every box output that's still used outside (or that drove one of the
+/// parent's outputs) becomes an output. The parent then reads those
+/// through the new box, so the circuit behaves exactly as before.
+pub fn extract_chip(
+    project: &Project,
+    design: &Design,
+    chip: &str,
+    selected: &[String],
+    new_name: &str,
+) -> Result<Extracted, String> {
+    if !is_valid_name(new_name) {
+        return Err(format!("`{new_name}` isn't a valid chip name (use letters, digits and _)"));
+    }
+    if design.chips.contains_key(new_name) || crate::gate::GateKind::from_name(new_name).is_some() {
+        return Err(format!("there's already a chip named `{new_name}`"));
+    }
+    let (file, def) = project
+        .files
+        .iter()
+        .find_map(|(id, f)| f.chips.iter().find(|c| c.name.name == chip).map(|c| (*id, c)))
+        .ok_or_else(|| format!("there's no chip named `{chip}`"))?;
+    let info = design.chips.get(chip).ok_or_else(|| format!("`{chip}` couldn't be checked"))?;
+    let text = project.sources.get(file).text.as_str();
+
+    let mut picked = Vec::new();
+    for name in selected {
+        let k = info
+            .instances
+            .iter()
+            .position(|i| &i.name == name)
+            .ok_or_else(|| format!("`{name}` isn't a box in `{chip}`"))?;
+        if matches!(info.instances[k].callee, crate::check::Callee::Unknown) {
+            return Err(format!("fix the chip name on `{name}`'s line first"));
+        }
+        picked.push(k);
+    }
+    if picked.is_empty() {
+        return Err("select the boxes to put in the new chip first".into());
+    }
+    let inside: std::collections::HashSet<&str> = picked.iter().map(|&k| info.instances[k].name.as_str()).collect();
+    let stmt_of =
+        |name: &str| def.stmts.iter().find(|s| s.target.name == name && matches!(s.value, StmtValue::Call(_)));
+
+    // Outside signals the boxes read become inputs: (as written outside, port name, width).
+    let mut inputs: Vec<(String, String, usize)> = Vec::new();
+    for &k in &picked {
+        for expr in info.instances[k].inputs.iter().flatten() {
+            for (base, port) in refs(expr) {
+                if inside.contains(base.name.as_str()) {
+                    continue;
+                }
+                let outer = match port {
+                    Some(p) => format!("{}.{}", base.name, p.name),
+                    None => base.name.clone(),
+                };
+                if inputs.iter().any(|(o, _, _)| *o == outer) {
+                    continue;
+                }
+                let name = outer.replace('.', "_");
+                let width = ref_width(design, info, &base.name, port.map(|p| p.name.as_str()))?;
+                inputs.push((outer, name, width));
+            }
+        }
+    }
+
+    // Which box outputs are read outside the selection.
+    let mut read_outside: std::collections::HashSet<(String, Option<String>)> = std::collections::HashSet::new();
+    let mut note_reads = |expr: &Expr| {
+        for (base, port) in refs(expr) {
+            read_outside.insert((base.name.clone(), port.map(|p| p.name.clone())));
+        }
+    };
+    for (k, inst) in info.instances.iter().enumerate() {
+        if !picked.contains(&k) {
+            inst.inputs.iter().flatten().for_each(&mut note_reads);
+        }
+    }
+    info.assigns.iter().for_each(|a| note_reads(&a.value));
+
+    // Outputs: (port name in the new chip, how it's driven inside, width,
+    // the parent output it drove directly, the box and output it comes from).
+    struct Out {
+        port: String,
+        width: usize,
+        drove: Option<String>,
+        from: (String, Option<String>),
+    }
+    let mut outputs: Vec<Out> = Vec::new();
+    for &k in &picked {
+        let inst = &info.instances[k];
+        let sig = design.signature(&inst.callee);
+        let multi = sig.outputs.len() > 1;
+        for (o, width) in &sig.outputs {
+            let read = if multi {
+                read_outside.contains(&(inst.name.clone(), Some(o.clone())))
+            } else {
+                read_outside.contains(&(inst.name.clone(), None))
+                    || read_outside.contains(&(inst.name.clone(), Some(o.clone())))
+            };
+            let drove = match inst.drives {
+                Some(Name::Output(i)) => Some(info.outputs[i].name.clone()),
+                Some(Name::Wire(i)) => Some(info.wires[i].name.clone()),
+                _ => None,
+            };
+            if read || drove.is_some() {
+                let port = if multi { format!("{}_{o}", inst.name) } else { inst.name.clone() };
+                outputs.push(Out { port, width: *width, drove, from: (inst.name.clone(), multi.then(|| o.clone())) });
+            }
+        }
+    }
+    let taken: Vec<&str> =
+        inputs.iter().map(|(_, n, _)| n.as_str()).chain(outputs.iter().map(|o| o.port.as_str())).collect();
+    if let Some(dup) = taken.iter().enumerate().find(|(i, n)| taken[..*i].contains(n)).map(|(_, n)| n) {
+        return Err(format!("two connections would both be called `{dup}`; rename one first"));
+    }
+
+    // The new chip: the selected lines, with outside `box.port` reads renamed to their input ports.
+    let decl = |name: &str, width: usize| if width == 1 { name.to_string() } else { format!("{name}[{width}]") };
+    let mut body = String::new();
+    if !inputs.is_empty() {
+        body += &format!("  in  {}\n", inputs.iter().map(|(_, n, w)| decl(n, *w)).collect::<Vec<_>>().join(", "));
+    }
+    if !outputs.is_empty() {
+        body += &format!("  out {}\n", outputs.iter().map(|o| decl(&o.port, o.width)).collect::<Vec<_>>().join(", "));
+    }
+    body.push('\n');
+    for &k in &picked {
+        let stmt = stmt_of(&info.instances[k].name).ok_or("a selected box has no line of its own")?;
+        let mut line = text[stmt.span.start..stmt.span.end].to_string();
+        let mut renames: Vec<(usize, usize, String)> = Vec::new();
+        if let StmtValue::Call(call) = &stmt.value {
+            for arg in &call.args {
+                for (base, port) in refs(&arg.value) {
+                    if let (Some(p), false) = (port, inside.contains(base.name.as_str())) {
+                        renames.push((base.span.start, p.span.end, format!("{}_{}", base.name, p.name)));
+                    }
+                }
+            }
+        }
+        renames.sort_by_key(|r| std::cmp::Reverse(r.0));
+        for (start, end, new) in renames {
+            line.replace_range(start - stmt.span.start..end - stmt.span.start, &new);
+        }
+        body += &format!("  {line}\n");
+    }
+    for out in &outputs {
+        if let (inst, Some(o)) = &out.from {
+            body += &format!("  {} = {inst}.{o}\n", out.port);
+        }
+    }
+    let raw = format!("chip {new_name} {{\n{body}}}\n");
+    let new_text = crate::format::format(&raw).unwrap_or(raw);
+
+    // The parent: drop the selected lines, add the new box, and read its outputs.
+    let instance = fresh_name(info, new_name);
+    let through = |port: &str| if outputs.len() == 1 { instance.clone() } else { format!("{instance}.{port}") };
+    let mut ed =
+        Editor { text, def, info, design, project, changes: Vec::new(), appended: Vec::new(), renamed: Vec::new() };
+    for &k in &picked {
+        if let Some(stmt) = stmt_of(&info.instances[k].name) {
+            ed.remove_stmt(stmt);
+        }
+    }
+    for stmt in &def.stmts {
+        if inside.contains(stmt.target.name.as_str()) && matches!(stmt.value, StmtValue::Call(_)) {
+            continue;
+        }
+        let exprs: Vec<&Expr> = match &stmt.value {
+            StmtValue::Call(call) => call.args.iter().map(|a| &a.value).collect(),
+            StmtValue::Expr(e) => vec![e],
+        };
+        for expr in exprs {
+            for (base, port) in refs(expr) {
+                // Names of boxes that drove an output mean the output, which stays.
+                if !inside.contains(base.name.as_str())
+                    || !matches!(info.names.get(&base.name), Some(Name::Instance(_)))
+                {
+                    continue;
+                }
+                let wanted = (base.name.clone(), port.map(|p| p.name.clone()));
+                let found = outputs.iter().find(|o| o.from == wanted || (o.from.1.is_none() && o.from.0 == base.name));
+                if let Some(out) = found {
+                    let end = port.map_or(base.span.end, |p| p.span.end);
+                    ed.changes.push((base.span.start, end, through(&out.port)));
+                }
+            }
+        }
+    }
+    ed.appended.push(format!(
+        "{instance} = {new_name}({})",
+        inputs.iter().map(|(o, _, _)| o.as_str()).collect::<Vec<_>>().join(", ")
+    ));
+    for out in &outputs {
+        if let Some(target) = &out.drove {
+            ed.appended.push(format!("{target} = {}", through(&out.port)));
+        }
+    }
+    let parent_text = ed.finish()?;
+    Ok(Extracted { parent_file: file, parent_text, new_text, instance })
+}
+
+/// Every `name` or `name.port` an expression reads.
+fn refs(expr: &Expr) -> Vec<(&ast::Ident, Option<&ast::Ident>)> {
+    match &expr.kind {
+        ExprKind::Ref { base, port, .. } => vec![(base, port.as_ref())],
+        ExprKind::Literal(_) => Vec::new(),
+        ExprKind::Concat(parts) => parts.iter().flat_map(refs).collect(),
+    }
+}
+
+fn ref_width(design: &Design, info: &ChipInfo, base: &str, port: Option<&str>) -> Result<usize, String> {
+    let unknown = || format!("can't work out how wide `{base}` is");
+    match info.names.get(base).ok_or_else(unknown)? {
+        Name::Input(i) => Ok(info.inputs[*i].width),
+        Name::Output(i) => Ok(info.outputs[*i].width),
+        Name::Wire(i) => Ok(info.wires[*i].width),
+        Name::Instance(k) => {
+            let sig = design.signature(&info.instances[*k].callee);
+            let out = match port {
+                Some(p) => sig.outputs.iter().find(|(n, _)| n == p),
+                None => sig.outputs.first(),
+            };
+            out.map(|(_, w)| *w).ok_or_else(unknown)
+        }
+    }
+}
+
+/// The first unused name like `nand1`, `nand2`, ... (or `add4_1` when the
+/// name already ends in a digit).
 pub fn fresh_name(info: &ChipInfo, base: &str) -> String {
     let base = base.to_lowercase();
-    (1..).map(|n| format!("{base}{n}")).find(|n| !info.names.contains_key(n)).expect("names run out eventually")
+    let sep = if base.ends_with(|c: char| c.is_ascii_digit()) { "_" } else { "" };
+    (1..).map(|n| format!("{base}{sep}{n}")).find(|n| !info.names.contains_key(n)).expect("names run out eventually")
 }
 
 pub fn is_valid_name(name: &str) -> bool {
@@ -548,5 +792,59 @@ mod tests {
     fn rejects_bad_names() {
         assert!(run(HALF, Edit::AddInstance { name: "a".into(), callee: "Not".into() }).is_err());
         assert!(run(HALF, Edit::AddPort { dir: PortDir::In, name: "1x".into(), width: 1 }).is_err());
+    }
+
+    /// Extracts boxes from an example chip, then checks the original tests
+    /// still pass with the new chip in the project.
+    fn extract_and_test(chip: &str, boxes: &[&str], new_name: &str) -> (String, String) {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../chips");
+        let project = Project::load(&dir).unwrap();
+        let design = Design::check(&project);
+        let selected: Vec<String> = boxes.iter().map(|b| b.to_string()).collect();
+        let out = extract_chip(&project, &design, chip, &selected, new_name).unwrap();
+        let mut sources: Vec<(std::path::PathBuf, String)> = project
+            .files
+            .iter()
+            .map(|(id, _)| {
+                let f = project.sources.get(*id);
+                let text = if *id == out.parent_file { out.parent_text.clone() } else { f.text.clone() };
+                (f.path.clone(), text)
+            })
+            .collect();
+        sources.push((format!("{new_name}.chip").into(), out.new_text.clone()));
+        let after = Project::from_sources(sources);
+        assert!(after.diagnostics.is_empty(), "{:#?}\n{}", after.diagnostics, out.parent_text);
+        let design = Design::check(&after);
+        let errors: Vec<_> = design.diagnostics.iter().filter(|d| d.is_error()).map(|d| d.message.clone()).collect();
+        assert!(errors.is_empty(), "{errors:?}\n{}\n{}", out.parent_text, out.new_text);
+        for test in design.tests.iter().filter(|t| t.chip == chip) {
+            assert!(crate::testing::run_test(&design, test).passed(), "{chip} tests fail after extracting");
+        }
+        (out.parent_text, out.new_text)
+    }
+
+    #[test]
+    fn extracts_part_of_an_xor() {
+        let (parent, new) = extract_and_test("Xor", &["n2", "n3"], "Pair");
+        assert_eq!(new, "chip Pair {\n  in  a, n1, b\n  out n2, n3\n\n  n2 = Nand(a, n1)\n  n3 = Nand(b, n1)\n}\n");
+        assert!(parent.contains("out = Nand(pair1.n2, pair1.n3)"), "{parent}");
+        assert!(parent.contains("pair1 = Pair(a, n1, b)"), "{parent}");
+        assert!(!parent.contains("n2  = Nand"), "{parent}");
+    }
+
+    #[test]
+    fn extracts_boxes_that_drive_outputs() {
+        let (parent, new) = extract_and_test("HalfAdder", &["sum", "carry"], "Core");
+        assert!(new.contains("out sum, carry"), "{new}");
+        assert!(parent.contains("core1 = Core(a, b)\n  sum = core1.sum\n  carry = core1.carry\n"), "{parent}");
+    }
+
+    #[test]
+    fn extracts_a_box_with_several_outputs() {
+        let (parent, new) = extract_and_test("FullAdder", &["h1"], "Front");
+        assert!(new.contains("out h1_sum, h1_carry"), "{new}");
+        assert!(new.contains("h1_sum   = h1.sum"), "{new}");
+        assert!(parent.contains("h2   = HalfAdder(front1.h1_sum, cin)"), "{parent}");
+        assert!(parent.contains("Or(front1.h1_carry, h2.carry)"), "{parent}");
     }
 }

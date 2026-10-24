@@ -6,7 +6,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::OnceLock;
 
 use egui::{
-    Align2, Color32, FontId, Key, PointerButton, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Vec2, pos2, vec2,
+    Align2, Color32, FontId, Key, Modifiers, PointerButton, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Vec2, pos2,
+    vec2,
 };
 use wafer_core::GateKind;
 use wafer_core::edit::{Edit, PortDir, Sink, fresh_name};
@@ -61,7 +62,16 @@ pub struct WireId {
 }
 
 pub struct Canvas {
+    /// The chip on screen, and the one edits apply to.
     pub chip: String,
+    /// The chip being simulated: the one opened from the Chips panel.
+    pub root: String,
+    /// Boxes dived into from the root, as (box name, its chip), outermost first.
+    pub path: Vec<(String, String)>,
+    /// Signal-name prefix for the chip on screen, like `fa0.h1.`.
+    pub prefix: String,
+    /// The Make Chip dialog's name field, while it's open.
+    make_chip: Option<(String, bool)>,
     offset: Vec2,
     zoom: f32,
     pub selection: BTreeSet<String>,
@@ -78,11 +88,18 @@ pub struct Canvas {
     /// Where the pointer last was over the canvas, for when a drag ends
     /// with the pointer already gone.
     last_pointer: Option<Pos2>,
+    /// The canvas widget's id, so app-wide shortcuts still work while it
+    /// has keyboard focus.
+    pub focus_id: Option<egui::Id>,
 }
 
 impl Canvas {
     pub fn new(chip: String) -> Canvas {
         Canvas {
+            root: chip.clone(),
+            path: Vec::new(),
+            prefix: String::new(),
+            make_chip: None,
             chip,
             offset: Vec2::ZERO,
             zoom: 1.0,
@@ -96,18 +113,77 @@ impl Canvas {
             cache: None,
             rect: Rect::NOTHING,
             last_pointer: None,
+            focus_id: None,
         }
     }
 
+    /// Opens a chip at the top level, to simulate on its own.
     pub fn open(&mut self, chip: &str) {
-        if self.chip != chip {
-            self.chip = chip.to_string();
-            self.selection.clear();
-            self.selected_wire = None;
-            self.drag = None;
-            self.moving.clear();
-            self.add_menu = None;
+        if self.root != chip || !self.path.is_empty() {
+            self.root = chip.to_string();
+            self.set_path(Vec::new());
         }
+    }
+
+    /// Looks inside a chip box on screen.
+    pub fn dive(&mut self, instance: &str, chip: &str) {
+        let mut path = self.path.clone();
+        path.push((instance.to_string(), chip.to_string()));
+        self.set_path(path);
+    }
+
+    /// Goes back out one level.
+    pub fn up(&mut self) {
+        if let Some((instance, _)) = self.path.last().cloned() {
+            let mut path = self.path.clone();
+            path.pop();
+            self.set_path(path);
+            self.selection = [instance].into();
+        }
+    }
+
+    pub fn set_path(&mut self, path: Vec<(String, String)>) {
+        self.path = path;
+        let chip = self.path.last().map_or(self.root.clone(), |(_, c)| c.clone());
+        self.prefix = self.path.iter().map(|(i, _)| format!("{i}.")).collect();
+        if chip != self.chip {
+            self.framed = None;
+        }
+        self.chip = chip;
+        self.selection.clear();
+        self.selected_wire = None;
+        self.drag = None;
+        self.moving.clear();
+        self.add_menu = None;
+        self.make_chip = None;
+    }
+
+    /// Drops levels of the path that no longer exist after an edit.
+    pub fn validate(&mut self, ws: &Workspace) {
+        let mut chip = self.root.clone();
+        let mut keep = 0;
+        for (instance, child) in &self.path {
+            let still_there = ws.design.chips.get(&chip).is_some_and(|info| {
+                info.instances
+                    .iter()
+                    .any(|i| &i.name == instance && i.callee == wafer_core::check::Callee::Chip(child.clone()))
+            });
+            if !still_there {
+                break;
+            }
+            chip = child.clone();
+            keep += 1;
+        }
+        if keep < self.path.len() {
+            let path = self.path[..keep].to_vec();
+            self.set_path(path);
+        }
+    }
+
+    /// A signal's value for the chip on screen (inside a dive, that's the
+    /// value inside that particular box).
+    fn val(&self, sim: &SimRunner, name: &str) -> Option<Vec<Logic>> {
+        sim.value(&format!("{}{name}", self.prefix))
     }
 
     /// The laid-out chip, rebuilt only when something changed.
@@ -164,6 +240,7 @@ impl Canvas {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, ws: &mut Workspace, sim: &mut SimRunner) {
+        self.breadcrumbs(ui);
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         self.rect = rect;
         let painter = ui.painter_at(rect);
@@ -191,7 +268,23 @@ impl Canvas {
         }
         let hit = pointer.map_or(Hit::Empty, |p| self.hit_test(&schematic, p));
         self.handle_pointer(ui, &response, &schematic, ws, sim);
-        if response.hovered() && !ui.ctx().egui_wants_keyboard_input() {
+        // The canvas takes keyboard focus (so Tab dives instead of moving
+        // focus around the window) unless you're typing somewhere else.
+        let id = response.id;
+        self.focus_id = Some(id);
+        let focused = ui.memory(|m| m.focused());
+        if response.clicked_by(PointerButton::Primary)
+            || response.drag_started()
+            || response.secondary_clicked()
+            || (response.hovered() && focused.is_none())
+        {
+            response.request_focus();
+        }
+        if response.has_focus() {
+            let filter = egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true };
+            ui.memory_mut(|m| m.set_focus_lock_filter(id, filter));
+        }
+        if response.hovered() && ui.memory(|m| m.focused().is_none_or(|f| f == id)) {
             self.handle_keys(ui, &schematic, ws, pointer);
         }
         if response.secondary_clicked() {
@@ -206,9 +299,114 @@ impl Canvas {
             && let Hit::Wire(w) = hit
             && let Some(wire) = schematic.wires.get(w)
         {
-            let value = sim.value(&wire.signal).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
+            let value = self.val(sim, &wire.signal).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
             response.on_hover_text_at_pointer(format!("{} = {value}", wire.signal));
         }
+        self.make_chip_dialog(ui, ws);
+    }
+
+    /// `Add4 › fa0 · FullAdder › h1 · HalfAdder`: click a level to go back to it.
+    fn breadcrumbs(&mut self, ui: &mut egui::Ui) {
+        let mut jump: Option<usize> = None;
+        ui.horizontal(|ui| {
+            let top = egui::RichText::new(&self.root).monospace();
+            if ui.selectable_label(self.path.is_empty(), top).clicked() {
+                jump = Some(0);
+            }
+            for (depth, (instance, chip)) in self.path.iter().enumerate() {
+                ui.label(egui::RichText::new("›").color(theme::MUTED));
+                let here = depth + 1 == self.path.len();
+                let text = egui::RichText::new(format!("{instance} · {chip}")).monospace();
+                if ui.selectable_label(here, text).clicked() {
+                    jump = Some(depth + 1);
+                }
+            }
+            let hint = if self.path.is_empty() {
+                "double-click a chip box (or Tab) to look inside".to_string()
+            } else {
+                format!("inside one {}: edits here change every {} · Shift+Tab to go back out", self.chip, self.chip)
+            };
+            ui.label(egui::RichText::new(hint).color(theme::MUTED).small());
+        });
+        if let Some(depth) = jump
+            && depth < self.path.len()
+        {
+            let path = self.path[..depth].to_vec();
+            self.set_path(path);
+        }
+    }
+
+    /// Cmd+G: names the new chip, then moves the selected boxes into it.
+    fn make_chip_dialog(&mut self, ui: &mut egui::Ui, ws: &mut Workspace) {
+        let Some((name, focus)) = &mut self.make_chip else { return };
+        let count = self.selection.iter().filter(|k| !k.contains(':')).count();
+        let (mut make, mut cancel) = (false, false);
+        egui::Window::new("Make a chip")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                ui.label(format!(
+                    "Turn the {count} selected box{} into a new chip.",
+                    if count == 1 { "" } else { "es" }
+                ));
+                ui.label(
+                    egui::RichText::new("Wires in and out become its inputs and outputs.").color(theme::MUTED).small(),
+                );
+                let field =
+                    ui.add(egui::TextEdit::singleline(name).hint_text("Chip name").font(egui::TextStyle::Monospace));
+                if *focus {
+                    field.request_focus();
+                    *focus = false;
+                }
+                if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    make = true;
+                }
+                ui.horizontal(|ui| {
+                    make |= ui.button("Make it").clicked();
+                    cancel |= ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape));
+                });
+            });
+        if cancel {
+            self.make_chip = None;
+            return;
+        }
+        if !make {
+            return;
+        }
+        let name = name.trim().to_string();
+        let Some(s) = self.cache.as_ref().map(|(_, _, _, s)| s.clone()) else { return };
+        let picked: Vec<&wafer_core::schematic::Node> =
+            s.nodes.iter().filter(|n| self.selection.contains(&n.key) && !n.key.contains(':')).collect();
+        if picked.is_empty() {
+            self.make_chip = None;
+            return;
+        }
+        let (sum_x, sum_y) = picked.iter().fold((0.0, 0.0), |(x, y), n| (x + n.x, y + n.y));
+        let place = (sum_x / picked.len() as f32, sum_y / picked.len() as f32);
+        let inner: Vec<(String, (f32, f32))> = picked.iter().map(|n| (n.key.clone(), (n.x, n.y))).collect();
+        let boxes: Vec<String> = picked.iter().map(|n| n.key.clone()).collect();
+        if let Some(instance) = ws.extract(&self.chip, &boxes, &name, place, inner) {
+            self.make_chip = None;
+            self.selection = [instance].into();
+            ws.status = Some((format!("Made {name}. Double-click it (or press Tab) to look inside."), false));
+        }
+    }
+
+    /// Opens the Make Chip dialog for the selected boxes.
+    pub fn start_make_chip(&mut self, ws: &Workspace) {
+        if self.selection.iter().any(|k| !k.contains(':')) {
+            let taken = |n: &str| ws.design.chips.contains_key(n);
+            let name = std::iter::once("Part".to_string())
+                .chain((2..).map(|n| format!("Part{n}")))
+                .find(|n| !taken(n))
+                .unwrap_or_default();
+            self.make_chip = Some((name, true));
+        }
+    }
+
+    pub fn make_chip_open(&self) -> bool {
+        self.make_chip.is_some()
     }
 
     fn pan_and_zoom(&mut self, ui: &egui::Ui, response: &egui::Response) {
@@ -273,7 +471,9 @@ impl Canvas {
             if let Some(p) = pointer {
                 self.update_move(p);
             }
-            if response.clicked() || ui.input(|i| i.pointer.primary_pressed() && response.hovered()) {
+            if response.clicked_by(PointerButton::Primary)
+                || ui.input(|i| i.pointer.primary_pressed() && response.hovered())
+            {
                 self.finish_move(ws);
             } else if response.secondary_clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
                 self.drag = None;
@@ -335,13 +535,42 @@ impl Canvas {
             }
         }
 
-        if response.clicked() {
+        // Double-click a chip box to look inside it, or empty space to go back out.
+        if response.double_clicked() {
+            match response.interact_pointer_pos().map_or(Hit::Empty, |p| self.hit_test(s, p)) {
+                Hit::Node(i) => {
+                    if let NodeKind::Chip { name, chip } = &s.nodes[i].kind
+                        && ws.design.chips.contains_key(chip)
+                    {
+                        let (name, chip) = (name.clone(), chip.clone());
+                        self.dive(&name, &chip);
+                        return;
+                    }
+                }
+                Hit::Empty => {
+                    self.up();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        if response.clicked_by(PointerButton::Primary) {
             let hit = response.interact_pointer_pos().map_or(Hit::Empty, |p| self.hit_test(s, p));
             match hit {
                 Hit::Node(i) | Hit::OutPin(i, _) | Hit::InPin(i, _) => {
                     let node = &s.nodes[i];
                     if let (NodeKind::Input { name, width: 1 }, Hit::Node(_)) = (&node.kind, hit) {
-                        sim.toggle(name);
+                        if self.prefix.is_empty() {
+                            sim.toggle(name);
+                        } else {
+                            let outer =
+                                self.path.len().checked_sub(2).map_or(self.root.clone(), |i| self.path[i].1.clone());
+                            ws.status = Some((
+                                format!("Inside a chip, `{name}` comes from {outer}. Flip inputs on {}.", self.root),
+                                false,
+                            ));
+                        }
                     }
                     if shift {
                         if !self.selection.remove(&node.key) {
@@ -426,6 +655,26 @@ impl Canvas {
                 i.key_pressed(Key::Escape),
             )
         });
+        let (up, dive, make) = ui.ctx().input_mut(|i| {
+            let up = i.consume_key(Modifiers::SHIFT, Key::Tab);
+            (up, !up && i.consume_key(Modifiers::NONE, Key::Tab), i.consume_key(Modifiers::COMMAND, Key::G))
+        });
+        if up {
+            self.up();
+            return;
+        }
+        if dive
+            && let [key] = self.selection.iter().collect::<Vec<_>>().as_slice()
+            && let Some(NodeKind::Chip { name, chip }) = s.nodes.iter().find(|n| &n.key == *key).map(|n| &n.kind)
+            && ws.design.chips.contains_key(chip)
+        {
+            let (name, chip) = (name.clone(), chip.clone());
+            self.dive(&name, &chip);
+            return;
+        }
+        if make {
+            self.start_make_chip(ws);
+        }
         let at = pointer.unwrap_or(self.rect.center());
         if add {
             self.open_add_menu(at);
@@ -654,7 +903,7 @@ impl Canvas {
             .as_ref()
             .and_then(|id| s.wires.iter().position(|w| s.nodes[w.source.0].key == id.node && w.source.1 == id.pin));
         for (i, wire) in s.wires.iter().enumerate() {
-            let value = sim.value(&wire.signal);
+            let value = self.val(sim, &wire.signal);
             let style = theme::wire_style(wire.width, value.as_deref());
             let stroke = Stroke::new((style.width * z).max(1.0), style.color);
             if selected_wire == Some(i) || hit == Hit::Wire(i) {
@@ -687,7 +936,7 @@ impl Canvas {
             let size = vec2(node.w, node.h) * z;
             match &node.kind {
                 NodeKind::Input { name, width } => {
-                    let value = sim.value(name);
+                    let value = self.val(sim, name);
                     self.port_box(painter, at, size, *width, value.as_deref());
                     self.text(
                         painter,
@@ -699,7 +948,7 @@ impl Canvas {
                     );
                 }
                 NodeKind::Output { name, width } => {
-                    let value = sim.value(name);
+                    let value = self.val(sim, name);
                     if *width == 1 {
                         let (fill, _) = theme::port_colors(value.as_deref());
                         painter.circle(at + size / 2.0, 11.0 * z, fill, Stroke::new(1.5 * z, theme::GATE_STROKE));
@@ -820,7 +1069,7 @@ impl Canvas {
             if wire.width == 1 {
                 continue;
             }
-            if let (Some((x, y)), Some(value)) = (wire.label_at, sim.value(&wire.signal)) {
+            if let (Some((x, y)), Some(value)) = (wire.label_at, self.val(sim, &wire.signal)) {
                 let style = theme::wire_style(wire.width, Some(&value));
                 let at = self.to_screen(pos2(x, y));
                 let text = format_bits(&value);

@@ -8,9 +8,10 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use egui::text::{LayoutJob, TextFormat};
-use egui::{FontId, RichText, Stroke};
+use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat};
+use egui::{Event, FontId, Key, Modifiers, RichText, Stroke};
 use wafer_core::ast::StmtValue;
+use wafer_core::complete::{Completions, Suggestion, complete};
 
 use crate::canvas::Canvas;
 use crate::theme;
@@ -32,6 +33,19 @@ pub struct CodePanel {
     conflict: bool,
     seen_revision: u64,
     last_cursor: Option<usize>,
+    /// Suggestions showing under the cursor.
+    popup: Option<Popup>,
+}
+
+struct Popup {
+    completions: Completions,
+    /// Byte offset of the cursor when the suggestions were made.
+    end: usize,
+    selected: usize,
+}
+
+fn editor_id() -> egui::Id {
+    egui::Id::new("code_editor")
 }
 
 impl CodePanel {
@@ -42,6 +56,44 @@ impl CodePanel {
 
     pub fn has_conflict(&self) -> bool {
         self.conflict
+    }
+
+    /// The suggestions showing right now (for tests).
+    pub fn suggestions(&self) -> Vec<String> {
+        self.popup
+            .as_ref()
+            .map(|p| p.completions.suggestions.iter().map(|s| s.label.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Reformats the whole file in the house style.
+    pub fn format(&mut self, ws: &mut Workspace) {
+        match wafer_core::format::format(&self.buffer) {
+            Ok(tidy) if tidy == self.buffer => ws.status = Some(("Already formatted".into(), false)),
+            Ok(tidy) => {
+                self.buffer = tidy;
+                self.edited = Some(Instant::now());
+                self.popup = None;
+                ws.status = Some(("Formatted".into(), false));
+            }
+            Err(message) => ws.status = Some((message, true)),
+        }
+    }
+
+    /// Puts a suggestion in place of the word being typed.
+    fn accept(&mut self, ctx: &egui::Context, suggestion: &Suggestion, start: usize, end: usize) {
+        if start > end || end > self.buffer.len() {
+            return;
+        }
+        self.buffer.replace_range(start..end, &suggestion.insert);
+        let byte = start + suggestion.insert.len();
+        let chars = self.buffer[..byte].chars().count().saturating_sub(suggestion.cursor_back);
+        if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, editor_id()) {
+            state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(chars))));
+            state.store(ctx, editor_id());
+        }
+        self.edited = Some(Instant::now());
+        self.popup = None;
     }
 
     /// Saves now if there are unsaved edits.
@@ -93,13 +145,32 @@ impl CodePanel {
             return;
         };
 
+        let focused = ui.memory(|m| m.has_focus(editor_id()));
+        let mut format = false;
+        if focused {
+            ui.input_mut(|i| {
+                if i.consume_key(Modifiers::SHIFT | Modifiers::ALT, Key::F) {
+                    format = true;
+                    // On a Mac, Option+Shift+F also types a character; drop it.
+                    i.events.retain(|e| !matches!(e, Event::Text(_)));
+                }
+            });
+        }
         ui.horizontal(|ui| {
             let name = path.strip_prefix(&ws.dir).unwrap_or(&path).display().to_string();
             ui.label(RichText::new(name).monospace().color(theme::MUTED));
             if self.edited.is_some() && !self.conflict {
-                ui.label(RichText::new("● saving…").color(theme::BUS).small());
+                ui.label(RichText::new("● saving…").monospace().color(theme::BUS).small());
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Format").on_hover_text("Tidy the whole file (Shift+Alt+F)").clicked() {
+                    format = true;
+                }
+            });
         });
+        if format {
+            self.format(ws);
+        }
         if self.conflict {
             ui.horizontal_wrapped(|ui| {
                 ui.label(
@@ -131,6 +202,28 @@ impl CodePanel {
             Vec::new()
         };
 
+        // While suggestions are showing, the arrow keys, Tab, Enter and Esc
+        // belong to them rather than the text.
+        let mut accept: Option<usize> = None;
+        if let (Some(popup), true) = (&mut self.popup, focused) {
+            let n = popup.completions.suggestions.len().max(1);
+            ui.input_mut(|i| {
+                if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
+                    popup.selected = (popup.selected + 1) % n;
+                }
+                if i.consume_key(Modifiers::NONE, Key::ArrowUp) {
+                    popup.selected = (popup.selected + n - 1) % n;
+                }
+                if i.consume_key(Modifiers::NONE, Key::Tab) || i.consume_key(Modifiers::NONE, Key::Enter) {
+                    accept = Some(popup.selected);
+                }
+            });
+            if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+                self.popup = None;
+            }
+        }
+        let force = focused && ui.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Space));
+
         let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, _wrap: f32| {
             let mut job = highlight(text.as_str(), selected.clone(), &problems);
             job.wrap.max_width = f32::INFINITY;
@@ -140,6 +233,7 @@ impl CodePanel {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 egui::TextEdit::multiline(&mut self.buffer)
+                    .id(editor_id())
                     .code_editor()
                     .desired_width(f32::INFINITY)
                     .desired_rows(30)
@@ -151,6 +245,30 @@ impl CodePanel {
 
         if output.response.changed() {
             self.edited = Some(Instant::now());
+        }
+
+        // Suggestions: refreshed as you type, closed when the cursor jumps.
+        let cursor = output.cursor_range.map(|r| char_to_byte(&self.buffer, r.primary.index.0));
+        if let (Some(index), Some(popup)) = (accept, &self.popup) {
+            let (start, end) = (popup.completions.start, popup.end);
+            if let Some(suggestion) = popup.completions.suggestions.get(index).cloned() {
+                self.accept(ui.ctx(), &suggestion, start, end);
+            }
+        } else if let Some(at) = cursor.filter(|_| output.response.changed() || force) {
+            let completions = complete(&ws.design, &self.buffer, at);
+            let typed = at > completions.start || self.buffer[..at].ends_with('.');
+            self.popup = (!completions.suggestions.is_empty() && (typed || force)).then_some(Popup {
+                completions,
+                end: at,
+                selected: 0,
+            });
+        } else if cursor != self.last_cursor || !output.response.has_focus() {
+            self.popup = None;
+        }
+        if let (Some(at), true) = (cursor, output.response.has_focus()) {
+            let ccursor = CCursor::new(self.buffer[..at].chars().count());
+            let below = output.galley_pos + output.galley.pos_from_cursor(ccursor).left_bottom().to_vec2();
+            self.show_popup(ui, ws, below, at);
         }
         let save_now =
             output.response.has_focus() && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S));
@@ -178,6 +296,55 @@ impl CodePanel {
             }
         }
         self.last_cursor = cursor;
+    }
+}
+
+impl CodePanel {
+    /// Draws the suggestion list under the cursor, or just the call's
+    /// signature when you're inside one.
+    fn show_popup(&mut self, ui: &egui::Ui, ws: &Workspace, at_screen: egui::Pos2, cursor: usize) {
+        let signature = match &self.popup {
+            Some(popup) => popup.completions.signature.clone(),
+            None => complete(&ws.design, &self.buffer, cursor).signature,
+        };
+        if self.popup.is_none() && signature.is_none() {
+            return;
+        }
+        let mut clicked: Option<usize> = None;
+        egui::Area::new(egui::Id::new("code_suggestions"))
+            .fixed_pos(at_screen + egui::vec2(0.0, 2.0))
+            .order(egui::Order::Foreground)
+            .interactable(true)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    if let Some(signature) = &signature {
+                        ui.label(RichText::new(signature).monospace().color(theme::SELECTED).small());
+                    }
+                    let Some(popup) = &self.popup else { return };
+                    if signature.is_some() {
+                        ui.separator();
+                    }
+                    for (i, s) in popup.completions.suggestions.iter().enumerate() {
+                        let row = ui.horizontal(|ui| {
+                            let label = RichText::new(&s.label).monospace().color(theme::TEXT);
+                            let pick = ui.selectable_label(i == popup.selected, label);
+                            ui.label(RichText::new(&s.detail).monospace().color(theme::MUTED).small());
+                            pick
+                        });
+                        if row.inner.clicked() {
+                            clicked = Some(i);
+                        }
+                    }
+                    ui.label(RichText::new("Up/Down pick · Tab accept · Esc close").color(theme::MUTED).small());
+                });
+            });
+        if let (Some(i), Some(popup)) = (clicked, &self.popup) {
+            let (start, end) = (popup.completions.start, popup.end);
+            if let Some(s) = popup.completions.suggestions.get(i).cloned() {
+                self.accept(ui.ctx(), &s, start, end);
+                ui.memory_mut(|m| m.request_focus(editor_id()));
+            }
+        }
     }
 }
 

@@ -4,8 +4,9 @@ A "Blender for computer chips": design digital chips from gates, simulate
 them one gate delay at a time, and test them. See [PLANNING.md](PLANNING.md)
 for the vision, the decisions so far, and the roadmap.
 
-Milestones 1a (the engine and the `wafer` command), 1b (the desktop app
-with its canvas) and 1c (the waveform timeline and code panel) are done.
+Phase 1 is done: the engine and `wafer` command (1a), the desktop app and
+canvas (1b), the waveform timeline and code panel (1c), and chips inside
+chips (1d).
 
 ## The app
 
@@ -26,6 +27,9 @@ anything else changes them, so you can edit text and boxes side by side.
 | Click an input | Flip it between 0 and 1 |
 | Drag / G | Move the selection (G: it follows the pointer; click to drop) |
 | Shift+D | Duplicate |
+| Cmd+G | Make a new chip from the selected boxes |
+| Tab / double-click | Look inside the selected chip box |
+| Shift+Tab | Go back out a level (or use the breadcrumbs) |
 | X or Delete | Delete the selected boxes or wire |
 | F | Frame everything |
 | Space / → | Play-pause / step one gate delay |
@@ -39,7 +43,9 @@ The **Timeline** tab shows every signal over time, one gate delay per
 step. Click or drag on it to scrub back in time (the canvas follows), and
 double-click to return to live. The **Code** tab (next to the Inspector)
 is the chip's file: edit it there and the canvas updates; select a box and
-its line lights up.
+its line lights up. It suggests names as you type (Tab accepts, Ctrl+Space
+asks), shows a call's inputs while you fill it in, and **Format**
+(Shift+Alt+F) tidies the whole file.
 
 ## The `wafer` command
 
@@ -57,7 +63,8 @@ cargo wafer -p chips sim FullAdder --set a=1,b=1,cin=1
 cargo wafer -p chips render Add4 --set a=0x9,b=0x9,cin=1
 ```
 
-`render` saves a PNG to `renders/` (pass `-o name.svg` for an SVG).
+`render` saves a PNG to `renders/` (pass `-o name.svg` for an SVG), and
+`fmt` formats every `.chip` file (`--check` only reports).
 `cargo wafer --help` lists every command.
 
 ## Writing chips

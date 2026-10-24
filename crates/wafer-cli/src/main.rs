@@ -27,6 +27,12 @@ struct Cli {
 enum Command {
     /// Check every chip for mistakes
     Check,
+    /// Format every .chip file in the house style (comments are kept)
+    Fmt {
+        /// Only report files that would change, and fail if any would
+        #[arg(long)]
+        check: bool,
+    },
     /// Run test blocks, and compare home-made gates with the built-in ones
     Test {
         /// Only test these chips
@@ -97,6 +103,7 @@ fn main() -> ExitCode {
 
     match cli.command {
         Command::Check => check(&design, errors, warnings, &ui),
+        Command::Fmt { check } => fmt(&project, check, &ui),
         Command::Test { chips } => test(&project, &design, &chips, errors, &ui),
         Command::Sim { chip, set, all } => sim(&design, &chip, &set, all, &ui),
         Command::Render { chip, set, output } => render(&project, &design, &chip, &set, output, &ui),
@@ -105,6 +112,36 @@ fn main() -> ExitCode {
 
 fn plural(n: usize, word: &str) -> String {
     if n == 1 { format!("{n} {word}") } else { format!("{n} {word}s") }
+}
+
+fn fmt(project: &Project, check_only: bool, ui: &Ui) -> ExitCode {
+    let (mut changed, mut skipped) = (0, 0);
+    for (id, _) in &project.files {
+        let file = project.sources.get(*id);
+        let shown = display_path(&file.path);
+        match wafer_core::format::format(&file.text) {
+            Ok(tidy) if tidy == file.text => {}
+            Ok(tidy) => {
+                changed += 1;
+                if check_only {
+                    println!("{} {shown} isn't formatted", ui.fail("✗"));
+                } else if let Err(e) = std::fs::write(&file.path, tidy) {
+                    eprintln!("{} can't write {shown}: {e}", ui.fail("error:"));
+                    return ExitCode::FAILURE;
+                } else {
+                    println!("{} formatted {shown}", ui.pass("✓"));
+                }
+            }
+            Err(_) => {
+                skipped += 1;
+                println!("{} skipped {shown}: it has syntax errors", ui.dim("·"));
+            }
+        }
+    }
+    if changed == 0 && skipped == 0 {
+        println!("{} every file is already formatted", ui.pass("✓"));
+    }
+    if check_only && changed > 0 { ExitCode::FAILURE } else { ExitCode::SUCCESS }
 }
 
 fn check(design: &Design, errors: usize, warnings: usize, ui: &Ui) -> ExitCode {
@@ -304,7 +341,12 @@ fn sim(design: &Design, chip: &str, sets: &[String], all: bool, ui: &Ui) -> Exit
     println!("{chip}: {}", if settled.is_ok() { ui.pass(&status) } else { ui.fail(&status) });
     let netlist = sim.netlist();
     let is_port = |path: &str| netlist.inputs.iter().chain(&netlist.outputs).any(|p| p.path == path);
-    let inside: Vec<_> = netlist.signals.iter().filter(|s| !is_port(&s.path) && (all || s.depth == 0)).collect();
+    let mut seen = std::collections::HashSet::new();
+    let inside: Vec<_> = netlist
+        .signals
+        .iter()
+        .filter(|s| !is_port(&s.path) && (all || s.depth == 0) && seen.insert(s.path.as_str()))
+        .collect();
     let width = netlist
         .inputs
         .iter()

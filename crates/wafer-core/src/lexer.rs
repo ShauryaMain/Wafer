@@ -27,6 +27,8 @@ pub enum Tok {
     Pipe,
     Star,
     Newline,
+    /// `// ...`, only produced by [`lex_with_comments`].
+    Comment,
     Eof,
 }
 
@@ -37,6 +39,7 @@ impl Tok {
             Tok::Ident(name) => format!("`{name}`"),
             Tok::Number { .. } => "a number".into(),
             Tok::Newline => "the end of the line".into(),
+            Tok::Comment => "a comment".into(),
             Tok::Eof => "the end of the file".into(),
             punct => format!("`{}`", punct.symbol()),
         }
@@ -58,7 +61,7 @@ impl Tok {
             Tok::Arrow => "<-",
             Tok::Pipe => "|",
             Tok::Star => "*",
-            Tok::Ident(_) | Tok::Number { .. } | Tok::Newline | Tok::Eof => "",
+            Tok::Ident(_) | Tok::Number { .. } | Tok::Newline | Tok::Comment | Tok::Eof => "",
         }
     }
 }
@@ -70,6 +73,16 @@ pub struct Token {
 }
 
 pub fn lex(file: FileId, text: &str, diags: &mut Vec<Diagnostic>) -> Vec<Token> {
+    lex_inner(file, text, diags, false)
+}
+
+/// Like [`lex`], but keeps comments as [`Tok::Comment`] tokens (their text
+/// is the token's span), for tools like the formatter.
+pub fn lex_with_comments(file: FileId, text: &str, diags: &mut Vec<Diagnostic>) -> Vec<Token> {
+    lex_inner(file, text, diags, true)
+}
+
+fn lex_inner(file: FileId, text: &str, diags: &mut Vec<Diagnostic>, comments: bool) -> Vec<Token> {
     let bytes = text.as_bytes();
     let mut tokens = Vec::new();
     let mut i = 0;
@@ -102,6 +115,10 @@ pub fn lex(file: FileId, text: &str, diags: &mut Vec<Diagnostic>) -> Vec<Token> 
             b'/' if bytes.get(i + 1) == Some(&b'/') => {
                 while i < bytes.len() && bytes[i] != b'\n' {
                     i += 1;
+                }
+                if comments {
+                    let end = start + text[start..i].trim_end().len();
+                    tokens.push(Token { tok: Tok::Comment, span: Span::new(file, start, end) });
                 }
             }
             b'<' if bytes.get(i + 1) == Some(&b'-') => {

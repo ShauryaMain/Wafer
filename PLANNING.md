@@ -215,10 +215,15 @@ Rules:
     - Timeline: one lane per signal at the chip's own level, buses drawn as hex segments, X shown red, markers where inputs changed. Click or drag to scrub (the canvas and Inspector show that step), double-click for live, pinch to zoom, Fit, and a Reset that puts every gate back to X.
     - Code panel: syntax colors, problems underlined, saves 0.35 s after you stop typing (or Cmd+S). Selecting a box highlights its line; putting the cursor on a line selects its box. If the file changes outside the app while you're typing, it asks which version to keep.
   - Not yet: picking which signals the timeline shows (it shows the chip's own level; inner signals come with 1d's dive-in).
-- **1d, Hierarchy.**
+- **1d, Hierarchy. ✅ Done 2026-10-24.**
   - Make Chip from a selection (Cmd+G).
   - Dive in and out with live values inside, and a working hierarchy tree.
   - *Done when:* you select a few gates, turn them into a chip, reuse it, and dive back inside it.
+  - Built:
+    - Make Chip writes the new chip to its own file. Wires crossing the selection become its inputs and outputs, and the parent's behavior is unchanged (checked by re-running its tests). One undo takes it all back.
+    - Tab or double-click a chip box to look inside; Shift+Tab, double-clicking empty space, or the breadcrumbs go back out. Inside, values (and the timeline) come from that particular box in the outer chip's simulation, and edits change the chip's definition everywhere.
+    - The Chips panel shows the open chip's insides as a tree.
+  - Also added to the code editor (requested): Format (button or Shift+Alt+F, plus `wafer fmt`) and autocompletion (gates and chips after `=`, outputs after `name.`, signals and named inputs inside calls, with the call's signature as a hint).
 
 ### Phase 2: Time & Memory
 

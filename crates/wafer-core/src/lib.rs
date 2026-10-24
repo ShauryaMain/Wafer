@@ -15,8 +15,10 @@
 
 pub mod ast;
 pub mod check;
+pub mod complete;
 pub mod diag;
 pub mod edit;
+pub mod format;
 pub mod gate;
 pub mod layout_file;
 pub mod lexer;

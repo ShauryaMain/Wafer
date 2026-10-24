@@ -14,8 +14,8 @@ chip SRLatch {
 
 test SRLatch {
   // s_n r_n | q q_n
-     0   1   | 1 0     // set
-     1   1   | 1 0     // hold: still 1
-     1   0   | 0 1     // reset
-     1   1   | 0 1     // hold: still 0
+     0   1   | 1 0  // set
+     1   1   | 1 0  // hold: still 1
+     1   0   | 0 1  // reset
+     1   1   | 0 1  // hold: still 0
 }

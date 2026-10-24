@@ -264,6 +264,7 @@ impl Workspace {
 
     fn write_layout(&self, path: &Path, layout: &LayoutFile) -> Result<(), String> {
         let empty = layout.chips.values().all(|nodes| nodes.is_empty());
+        // (A missing file and an empty layout mean the same thing.)
         if empty && !path.exists() {
             return Ok(());
         }
@@ -296,6 +297,58 @@ impl Workspace {
             self.redo.clear();
             self.reload();
         }
+    }
+
+    /// "Make Chip": moves boxes of `chip` into a new chip `name` in its own
+    /// file, as one undoable step. `place` is where the new box goes in the
+    /// parent and `inner` keeps the moved boxes' positions inside. Returns
+    /// the new box's name.
+    pub fn extract(
+        &mut self,
+        chip: &str,
+        boxes: &[String],
+        name: &str,
+        place: (f32, f32),
+        inner: Vec<(String, (f32, f32))>,
+    ) -> Option<String> {
+        let result = (|| {
+            if let Some(stale) = &self.stale {
+                return Err(format!("{stale}; fix it first"));
+            }
+            let out = edit::extract_chip(&self.project, &self.design, chip, boxes, name)?;
+            let parent_path = self.project.sources.get(out.parent_file).path.clone();
+            let new_path = parent_path.with_file_name(format!("{name}.chip"));
+            if new_path.exists() {
+                return Err(format!("{} already exists", new_path.display()));
+            }
+            let parent_layout = LayoutFile::path_for(&parent_path);
+            let new_layout = LayoutFile::path_for(&new_path);
+            let snapshot =
+                Snapshot::take(&[parent_path.clone(), new_path.clone(), parent_layout.clone(), new_layout.clone()]);
+
+            std::fs::write(&new_path, &out.new_text).map_err(|e| e.to_string())?;
+            std::fs::write(&parent_path, &out.parent_text).map_err(|e| e.to_string())?;
+            let mut layout = self.layouts.get(&parent_layout).cloned().unwrap_or_default();
+            for b in boxes {
+                layout.remove_key(chip, b);
+            }
+            layout.set_positions(chip, [(out.instance.clone(), place)]);
+            self.write_layout(&parent_layout, &layout)?;
+            let mut inside = LayoutFile::default();
+            inside.set_positions(name, inner);
+            self.write_layout(&new_layout, &inside)?;
+
+            self.reload();
+            if self.stale.is_some() {
+                snapshot.restore();
+                self.reload();
+                return Err("making that chip would have broken a file, so it was undone".into());
+            }
+            self.undo.push(snapshot);
+            self.redo.clear();
+            Ok(out.instance)
+        })();
+        self.report(result)
     }
 
     /// Creates `Name.chip` with an empty chip in it.

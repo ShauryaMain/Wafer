@@ -414,3 +414,109 @@ fn code_panel_follows_the_canvas_and_saves_typing() {
     h.run_steps(2);
     assert_eq!(h.state().state.code.text(), outside);
 }
+
+#[test]
+fn code_panel_formats_and_completes() {
+    let dir = project("complete", &[("Mine.chip", "chip Mine {\nin a,b\n  out y\n  y=Nand( a,b )\n}\n")]);
+    let mut h = open(&dir);
+    h.state_mut().show_tab(Tab::Code);
+    h.run_steps(3);
+
+    // Format tidies the file and saves it.
+    h.get_by_label("Format").click();
+    h.run_steps(2);
+    let tidy = "chip Mine {\n  in  a, b\n  out y\n  y = Nand(a, b)\n}\n";
+    assert_eq!(h.state().state.code.text(), tidy);
+    std::thread::sleep(wafer_app::code::SAVE_DELAY + std::time::Duration::from_millis(50));
+    h.run_steps(3);
+    assert_eq!(chip_text(&dir, "Mine.chip"), tidy);
+
+    // Typing suggests what fits; Tab accepts and lands inside the parentheses.
+    h.get(by().role(egui::accesskit::Role::MultilineTextInput)).focus();
+    h.run_steps(1);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.run_steps(1);
+    h.event(Event::Text("chip Mine {\n  in  a, b\n  out y\n  y = Na".into()));
+    h.run_steps(2);
+    assert_eq!(h.state().state.code.suggestions(), vec!["Nand".to_string()]);
+    shot(&mut h, "code_completion");
+    h.key_press(Key::Tab);
+    h.run_steps(2);
+    h.event(Event::Text("a, b".into()));
+    h.run_steps(2);
+    assert!(h.state().state.code.text().ends_with("y = Nand(a, b)"), "{}", h.state().state.code.text());
+    h.key_press(Key::Escape);
+    h.run_steps(1);
+    assert!(h.state().state.code.suggestions().is_empty());
+}
+
+#[test]
+fn makes_a_chip_and_looks_inside_it() {
+    let dir = example_project("hierarchy");
+    let original = chip_text(&dir, "Xor.chip");
+    let mut h = open(&dir);
+    h.state_mut().state.open_chip("Xor");
+    h.run_steps(3);
+    h.state_mut().state.sim.set_input("a", vec![Logic::One]);
+    h.run_steps(3);
+
+    // Select two gates and press Cmd+G; the dialog suggests a name.
+    h.state_mut().state.canvas.selection = ["n2".to_string(), "n3".to_string()].into();
+    let c = h.state().state.canvas.rect().center();
+    h.hover_at(c);
+    h.run_steps(1);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::G);
+    h.run_steps(2);
+    assert!(h.state().state.canvas.make_chip_open());
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    let xor = chip_text(&dir, "Xor.chip");
+    assert!(xor.contains("part1 = Part(a, n1, b)"), "{xor}");
+    assert!(chip_text(&dir, "Part.chip").contains("n2 = Nand(a, n1)"));
+    let tests = h.state().state.tests.as_ref().unwrap();
+    assert!(!tests.is_empty() && tests.passed(), "Xor still works");
+    assert_eq!(h.state().state.canvas.selection.iter().next().map(String::as_str), Some("part1"));
+
+    // Tab looks inside; the values come from the outer chip's simulation.
+    h.hover_at(c);
+    h.run_steps(1);
+    h.key_press(Key::Tab);
+    h.run_steps(3);
+    let st = &h.state().state;
+    assert_eq!(st.canvas.chip, "Part");
+    assert_eq!(st.canvas.prefix, "part1.");
+    assert_eq!(st.value("n1"), Some(vec![Logic::One]), "Nand(1, 0) outside");
+    assert_eq!(st.value("n2"), Some(vec![Logic::Zero]), "Nand(a=1, n1=1)");
+    assert_eq!(st.value("n3"), Some(vec![Logic::One]), "Nand(b=0, n1=1)");
+    shot(&mut h, "inside_part");
+
+    // Shift+Tab goes back out; double-click (or the tree) goes back in.
+    h.key_press_modifiers(Modifiers::SHIFT, Key::Tab);
+    h.run_steps(2);
+    assert_eq!(h.state().state.canvas.chip, "Xor");
+    let part = node_center(&mut h, "part1");
+    h.hover_at(part);
+    h.run_steps(1);
+    for pressed in [true, false, true, false] {
+        press(&h, part, pressed);
+        h.run_steps(1);
+    }
+    h.run_steps(2);
+    assert_eq!(h.state().state.canvas.chip, "Part", "double-click dives in");
+    h.hover_at(c);
+    h.key_press_modifiers(Modifiers::SHIFT, Key::Tab);
+    h.run_steps(2);
+    assert_eq!(h.state().state.canvas.chip, "Xor");
+    h.get_by_label("part1 · Part").click();
+    h.run_steps(2);
+    assert_eq!(h.state().state.canvas.chip, "Part", "the tree dives in");
+
+    // Undo takes the whole thing back, new file and all.
+    h.state_mut().state.canvas.set_path(Vec::new());
+    h.run_steps(1);
+    h.hover_at(c);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run_steps(3);
+    assert_eq!(chip_text(&dir, "Xor.chip"), original);
+    assert!(!dir.join("Part.chip").exists());
+}

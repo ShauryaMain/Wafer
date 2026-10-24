@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 
 use wafer_core::logic::Logic;
-use wafer_core::netlist::Signal;
 use wafer_core::testing::{self, BuiltinCheck, TestOutcome};
 use wafer_core::trace::Trace;
 use wafer_core::{Netlist, Simulator};
@@ -80,7 +79,9 @@ impl SimRunner {
                         sim.set_input_by_name(name, bits);
                     }
                 }
-                self.trace = Some(Trace::new(&sim, timeline_signals(&sim)));
+                // Everything at every level, so diving into a chip can show
+                // (and scrub) its insides too.
+                self.trace = Some(Trace::new(&sim, sim.netlist().signals.clone()));
                 self.sim = Some(sim);
                 self.error = None;
             }
@@ -197,20 +198,6 @@ impl SimRunner {
             format!("paused after {}", delays(self.steps))
         }
     }
-}
-
-/// The signals the timeline shows: inputs, then outputs, then everything
-/// else at the chip's own level.
-fn timeline_signals(sim: &Simulator) -> Vec<Signal> {
-    let netlist = sim.netlist();
-    let is_port = |s: &Signal| netlist.inputs.iter().chain(&netlist.outputs).any(|p| p.path == s.path);
-    netlist
-        .inputs
-        .iter()
-        .chain(&netlist.outputs)
-        .cloned()
-        .chain(netlist.signals.iter().filter(|s| s.depth == 0 && !is_port(s)).cloned())
-        .collect()
 }
 
 /// The latest test results for the current chip.

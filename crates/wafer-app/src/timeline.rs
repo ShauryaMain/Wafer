@@ -40,7 +40,8 @@ impl TimelineView {
     }
 }
 
-pub fn ui(ui: &mut egui::Ui, view: &mut TimelineView, sim: &mut SimRunner) {
+/// `scope` is the signal prefix of the chip on screen (`""` at the top).
+pub fn ui(ui: &mut egui::Ui, view: &mut TimelineView, sim: &mut SimRunner, scope: &str) {
     let now = sim.now();
     let mut fit = false;
     ui.horizontal(|ui| {
@@ -89,7 +90,19 @@ pub fn ui(ui: &mut egui::Ui, view: &mut TimelineView, sim: &mut SimRunner) {
         view.left = (now as f64 + 3.0 - visible).max(trace.start as f64);
     }
 
-    let content_h = trace.signals.len() as f32 * LANE_H;
+    // One lane per signal at the level on screen, in the order the chip
+    // names them: inputs, outputs, then everything inside.
+    let mut rows: Vec<usize> = Vec::new();
+    if let Some(live) = &sim.sim {
+        for signal in live.netlist().signals_at(scope) {
+            if let Some(i) = trace.index_of(&signal.path)
+                && !rows.contains(&i)
+            {
+                rows.push(i);
+            }
+        }
+    }
+    let content_h = rows.len() as f32 * LANE_H;
     let max_scroll = (content_h - wave.height()).max(0.0);
     if response.hovered() {
         let (scroll, zoom, pointer) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.pointer.hover_pos()));
@@ -164,8 +177,9 @@ pub fn ui(ui: &mut egui::Ui, view: &mut TimelineView, sim: &mut SimRunner) {
     let shown = sim.cursor.unwrap_or(now);
     let lanes = painter.with_clip_rect(Rect::from_min_max(pos2(rect.min.x, wave.min.y), rect.max));
     let lane_waves = lanes.with_clip_rect(wave);
-    for (i, signal) in trace.signals.iter().enumerate() {
-        let top = wave.min.y + i as f32 * LANE_H - view.scroll;
+    for (row, &i) in rows.iter().enumerate() {
+        let signal = &trace.signals[i];
+        let top = wave.min.y + row as f32 * LANE_H - view.scroll;
         if top + LANE_H < wave.min.y || top > wave.max.y {
             continue;
         }
@@ -175,7 +189,7 @@ pub fn ui(ui: &mut egui::Ui, view: &mut TimelineView, sim: &mut SimRunner) {
         lanes.text(
             pos2(rect.min.x + 8.0, lane.center().y),
             Align2::LEFT_CENTER,
-            &signal.path,
+            signal.path.strip_prefix(scope).unwrap_or(&signal.path),
             FontId::monospace(12.0),
             theme::TEXT,
         );

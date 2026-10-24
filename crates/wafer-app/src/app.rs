@@ -96,19 +96,25 @@ impl AppState {
     /// tests in step with them, and handle app-wide shortcuts.
     pub fn tick(&mut self, ctx: &egui::Context) {
         self.ws.poll();
-        if !self.ws.design.chips.contains_key(&self.canvas.chip)
+        if !self.ws.design.chips.contains_key(&self.canvas.root)
             && let Some(first) = self.ws.chip_names().last().cloned()
         {
             self.open_chip(&first);
         }
+        self.canvas.validate(&self.ws);
+        // The top-level chip is simulated; diving in just looks inside it.
+        let root = self.canvas.root.clone();
+        self.sim.sync(&self.ws, &root);
         let chip = self.canvas.chip.clone();
-        self.sim.sync(&self.ws, &chip);
         let stale_tests = self.tests.as_ref().is_none_or(|t| t.chip != chip || t.generation != self.ws.generation);
         if stale_tests {
             self.tests = Some(TestResults::run(&self.ws, &chip));
         }
 
-        if !ctx.egui_wants_keyboard_input() {
+        // App-wide shortcuts, unless you're typing in a text field. (The
+        // canvas holding keyboard focus doesn't count as typing.)
+        let typing = ctx.memory(|m| m.focused()).is_some_and(|f| Some(f) != self.canvas.focus_id);
+        if !typing {
             let redo = ctx.input_mut(|i| {
                 i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z))
             });
@@ -146,7 +152,7 @@ impl AppState {
             if ui.button(label).on_hover_text("Space").clicked() {
                 self.sim.playing = !self.sim.playing;
             }
-            if ui.button("Step").on_hover_text("→  one gate delay").clicked() {
+            if ui.button("Step").on_hover_text("One gate delay (right arrow key)").clicked() {
                 self.sim.step();
             }
             ui.add_enabled(
@@ -238,7 +244,7 @@ impl TabViewer for Tabs<'_> {
             Tab::Inspector => panels::inspector(ui, state),
             Tab::Tests => panels::tests(ui, state),
             Tab::Problems => panels::problems(ui, state),
-            Tab::Timeline => timeline::ui(ui, &mut state.timeline, &mut state.sim),
+            Tab::Timeline => timeline::ui(ui, &mut state.timeline, &mut state.sim, &state.canvas.prefix),
             Tab::Code => state.code.ui(ui, &mut state.ws, &mut state.canvas),
         }
     }
@@ -272,6 +278,12 @@ impl eframe::App for WaferApp {
 }
 
 impl AppState {
+    /// A signal's value in the chip on screen (inside the box you've dived
+    /// into, if you have).
+    pub fn value(&self, name: &str) -> Option<Vec<wafer_core::Logic>> {
+        self.sim.value(&format!("{}{name}", self.canvas.prefix))
+    }
+
     /// Keys of every box on the open chip's canvas (for tests and tools).
     pub fn canvas_keys(&self) -> Vec<String> {
         wafer_core::schematic::layout(&self.ws.design, &self.ws.project.sources, &self.canvas.chip)

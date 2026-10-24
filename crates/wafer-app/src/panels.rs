@@ -2,6 +2,7 @@
 //! timeline placeholder.
 
 use egui::{Color32, RichText};
+use wafer_core::check::Callee;
 use wafer_core::edit::Edit;
 use wafer_core::logic::{Logic, bits_from_u64, bits_to_u64, format_bits};
 use wafer_core::schematic::NodeKind;
@@ -22,7 +23,7 @@ fn mono(text: impl Into<String>) -> RichText {
 pub fn chips(ui: &mut egui::Ui, state: &mut AppState) {
     egui::ScrollArea::vertical().show(ui, |ui| {
         heading(ui, "CHIPS");
-        let current = state.canvas.chip.clone();
+        let current = state.canvas.root.clone();
         for name in state.ws.chip_names() {
             let ok = state.ws.design.is_buildable(&name);
             let mut text = RichText::new(&name).monospace();
@@ -37,6 +38,22 @@ pub fn chips(ui: &mut egui::Ui, state: &mut AppState) {
                 response.on_hover_text("This chip (or one inside it) has errors. See Problems.");
             }
         }
+
+        // The open chip's insides, as a tree: click a level to look inside it.
+        let root = state.canvas.root.clone();
+        if has_chips_inside(&state.ws.design, &root) {
+            ui.add_space(12.0);
+            heading(ui, &format!("INSIDE {}", root.to_uppercase()));
+            let mut go: Option<Vec<(String, String)>> = None;
+            if ui.selectable_label(state.canvas.path.is_empty(), mono(&root)).clicked() {
+                go = Some(Vec::new());
+            }
+            tree(ui, &state.ws.design, &root, &mut Vec::new(), &state.canvas.path, &mut go);
+            if let Some(path) = go {
+                state.canvas.set_path(path);
+            }
+        }
+
         ui.add_space(12.0);
         heading(ui, "NEW CHIP");
         ui.horizontal(|ui| {
@@ -51,6 +68,51 @@ pub fn chips(ui: &mut egui::Ui, state: &mut AppState) {
             }
         });
     });
+}
+
+fn has_chips_inside(design: &wafer_core::Design, chip: &str) -> bool {
+    design.chips.get(chip).is_some_and(|info| info.instances.iter().any(|i| matches!(i.callee, Callee::Chip(_))))
+}
+
+/// One level of the hierarchy tree. Gates are left out; chips can be
+/// expanded and clicked.
+fn tree(
+    ui: &mut egui::Ui,
+    design: &wafer_core::Design,
+    chip: &str,
+    path: &mut Vec<(String, String)>,
+    current: &[(String, String)],
+    go: &mut Option<Vec<(String, String)>>,
+) {
+    let Some(info) = design.chips.get(chip) else { return };
+    if path.len() > 12 {
+        return;
+    }
+    for inst in &info.instances {
+        let Callee::Chip(child) = &inst.callee else { continue };
+        path.push((inst.name.clone(), child.clone()));
+        let here = path.as_slice() == current;
+        let label = mono(format!("{} · {child}", inst.name));
+        if has_chips_inside(design, child) {
+            let id = ui.make_persistent_id(path.iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>().join("."));
+            let open = current.starts_with(path);
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, open)
+                .show_header(ui, |ui| {
+                    if ui.selectable_label(here, label).clicked() {
+                        *go = Some(path.clone());
+                    }
+                })
+                .body(|ui| tree(ui, design, child, path, current, go));
+        } else {
+            ui.horizontal(|ui| {
+                ui.add_space(18.0);
+                if ui.selectable_label(here, label).clicked() {
+                    *go = Some(path.clone());
+                }
+            });
+        }
+        path.pop();
+    }
 }
 
 pub fn inspector(ui: &mut egui::Ui, state: &mut AppState) {
@@ -78,7 +140,7 @@ pub fn inspector(ui: &mut egui::Ui, state: &mut AppState) {
         {
             heading(ui, "WIRE");
             ui.label(mono(&wire.signal));
-            let value = state.sim.value(&wire.signal).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
+            let value = state.value(&wire.signal).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
             ui.label(format!("value {value} · {} bit{}", wire.width, if wire.width == 1 { "" } else { "s" }));
             ui.add_space(6.0);
             heading(ui, "FEEDS");
@@ -156,7 +218,7 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState, s: &wafer_core::schem
             let feed = s.wires.iter().find(|w| w.sinks.contains(&(i, p)));
             let text = match feed {
                 Some(w) => {
-                    let value = state.sim.value(&w.signal).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
+                    let value = state.value(&w.signal).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
                     format!("{:<6} ← {} = {value}", pin.name, w.signal)
                 }
                 None if s.tags.iter().any(|t| (t.x + 2.0 - pin.x).abs() < 0.5 && (t.y - pin.y).abs() < 0.5) => {
@@ -177,7 +239,7 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState, s: &wafer_core::schem
         }
     }
     if let NodeKind::Output { name, .. } = &node.kind {
-        let value = state.sim.value(name).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
+        let value = state.value(name).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
         ui.label(mono(format!("value {value}")));
     }
     if !node.outputs.is_empty() && !matches!(node.kind, NodeKind::Input { .. }) {
@@ -185,7 +247,7 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState, s: &wafer_core::schem
         for (p, pin) in node.outputs.iter().enumerate() {
             let wire = s.wires.iter().find(|w| w.source == (i, p));
             let value =
-                wire.and_then(|w| state.sim.value(&w.signal)).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
+                wire.and_then(|w| state.value(&w.signal)).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
             ui.label(mono(format!("{:<6} → {value}", pin.name)));
         }
     }
@@ -196,6 +258,11 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState, s: &wafer_core::schem
 }
 
 fn input_editor(ui: &mut egui::Ui, state: &mut AppState, name: &str, width: usize) {
+    if !state.canvas.prefix.is_empty() {
+        let value = state.value(name).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
+        ui.label(mono(value)).on_hover_text(format!("Driven from outside; change it on {}", state.canvas.root));
+        return;
+    }
     let current = state.sim.read(name);
     ui.horizontal(|ui| {
         if width == 1 {
@@ -248,7 +315,7 @@ fn chip_overview(ui: &mut egui::Ui, state: &mut AppState) {
     ui.add_space(4.0);
     heading(ui, "OUTPUTS");
     for port in &info.outputs {
-        let value = state.sim.value(&port.name).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
+        let value = state.value(&port.name).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
         ui.label(mono(format!("{:<6} {value}", port.name)));
     }
     ui.add_space(12.0);

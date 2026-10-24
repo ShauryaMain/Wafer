@@ -17,6 +17,7 @@ pub struct Trace {
     pub marks: Vec<u64>,
     /// For each net, the traced signals that include it.
     readers: Vec<Vec<u32>>,
+    by_path: std::collections::HashMap<String, usize>,
     recorded: usize,
 }
 
@@ -24,8 +25,11 @@ pub struct Trace {
 const MAX_CHANGES: usize = 400_000;
 
 impl Trace {
-    /// Starts tracing `signals`, recording their current values.
+    /// Starts tracing `signals` (each path once), recording their current
+    /// values.
     pub fn new(sim: &Simulator, signals: Vec<Signal>) -> Trace {
+        let mut seen = std::collections::HashSet::new();
+        let signals: Vec<Signal> = signals.into_iter().filter(|s| seen.insert(s.path.clone())).collect();
         let mut readers = vec![Vec::new(); sim.netlist().net_count];
         for (i, signal) in signals.iter().enumerate() {
             for &net in &signal.nets {
@@ -37,7 +41,8 @@ impl Trace {
         let time = sim.time();
         let changes = signals.iter().map(|s| vec![(time, sim.values(&s.nets))]).collect();
         let recorded = signals.len();
-        Trace { signals, changes, start: time, end: time, marks: Vec::new(), readers, recorded }
+        let by_path = signals.iter().enumerate().map(|(i, s)| (s.path.clone(), i)).collect();
+        Trace { signals, changes, start: time, end: time, marks: Vec::new(), readers, by_path, recorded }
     }
 
     /// Records whatever changed among `nets` (as returned by
@@ -97,7 +102,7 @@ impl Trace {
     }
 
     pub fn index_of(&self, path: &str) -> Option<usize> {
-        self.signals.iter().position(|s| s.path == path)
+        self.by_path.get(path).copied()
     }
 
     /// Forgets everything before `cutoff`, keeping each signal's value at

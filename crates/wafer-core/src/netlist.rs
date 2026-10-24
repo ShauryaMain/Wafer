@@ -37,7 +37,10 @@ pub struct Netlist {
     pub constants: Vec<(NetId, Logic)>,
     pub inputs: Vec<Signal>,
     pub outputs: Vec<Signal>,
-    /// Every named signal in the hierarchy, each path once, outer chips first.
+    /// Every named signal in the hierarchy, outer chips first. A chip's
+    /// ports appear twice: named from outside (`h1.sum`, at the outer
+    /// chip's depth) and from inside (its own port `sum`, one level deeper),
+    /// so each level can list exactly its own signals.
     pub signals: Vec<Signal>,
 }
 
@@ -97,11 +100,6 @@ impl Netlist {
             depth: 0,
         };
 
-        // A chip's outputs are named both from outside (`h1.sum`) and from
-        // inside it (its port `sum`, also `h1.sum`). Keep the outer one.
-        let mut seen = std::collections::HashSet::new();
-        b.signals.retain(|s| seen.insert(s.path.clone()));
-
         let netlist = Netlist {
             chip: chip.into(),
             net_count: net_count as usize,
@@ -113,6 +111,13 @@ impl Netlist {
         };
         netlist.check_drivers()?;
         Ok(netlist)
+    }
+
+    /// The signals one level of the hierarchy names: `prefix` is `""` for
+    /// the chip itself or like `fa0.h1.` for a chip inside it.
+    pub fn signals_at<'a>(&'a self, prefix: &'a str) -> impl Iterator<Item = &'a Signal> + 'a {
+        let depth = prefix.matches('.').count();
+        self.signals.iter().filter(move |s| s.depth == depth && s.path.starts_with(prefix))
     }
 
     pub fn signal(&self, path: &str) -> Option<&Signal> {
