@@ -340,7 +340,7 @@ The spec is [docs/crumb.md](docs/crumb.md): memory map, instruction encoding, th
     3. `Shift16`: shifts by 0 to 15 places, with `left` and `right` outputs (ALU16 uses one for `lshift`, the other for `rshift`). ✅ Built by the user on 2026-10-24: two barrel-shifter chains of four Muxes; all 12 tests pass.
     4. `Compare16`: `eq`, `lt` (signed) and `ult` (unsigned) as 1-bit flags, which ALU16 widens into Forth flags. Built by subtracting with Add16. ✅ Built by the user on 2026-10-24: Add16 does `a + ~b + 1`, a tree of Ors on the halves checks for zero, and a Mux picks the signed answer; all 14 tests pass.
     5. `ALU16`: all 16 operations, with `op` picking the result. Built from units side by side (three Add16s, And/Or/Xor/Not ×16, Compare16 with its flags widened by Muxes, Shift16), then a helper `Mux4` (three Muxes, 1-bit pins, so it spreads) picks within each group of four and then the group. ✅ Built by the user on 2026-10-24, Mux4 and ALU16 both: all 32 tests pass, and `alu16_vs_reference` shows ALU16 matching the reference Crumb's ALU on 400 random inputs. (Building it pushed the Chips panel's New chip field out of view, so it now sits above the scrolling lists.)
-    6. `Inc13`: the program counter's +1.
+    6. `Inc13`: the program counter's +1, wrapping from 0x1FFF to 0. One Add16 with the 13-bit number in its low bits. ✅ Built by the user on 2026-10-24, on their own from the guide's outline; all 7 tests pass.
     7. `StackPointer`: a 5-bit pointer that moves by 0, +1, −1 or −2.
     8. `Decode`: splits an instruction into its fields (kind, op, flags, stack moves, address).
     9. `Crumb`: registers, both stacks, fetch and execute, and the memory bus.

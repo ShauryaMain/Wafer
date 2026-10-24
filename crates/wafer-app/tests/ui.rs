@@ -1206,3 +1206,44 @@ fn builds_mux4_and_alu16() {
     let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "ALU16");
     assert!(results.passed(), "ALU16's tests fail:\n{text}");
 }
+
+/// Builds Inc13 on the canvas the way the guide in the chat says to.
+#[test]
+fn builds_inc13_from_add16() {
+    let dir = example_project("inc13");
+    reset_chip(&dir, "Inc13", "  in  a[13]\n  out out[13]\n");
+    let mut h = open(&dir);
+    h.state_mut().state.open_chip("Inc13");
+    h.run_steps(3);
+    let c = h.state().state.canvas.rect().center();
+    add(&mut h, c, "Add16");
+    h.hover_at(c);
+    h.run_steps(1);
+    h.key_press(Key::F);
+    h.run_steps(3);
+
+    // 13 bits into a 16-bit pin: they fill the low bits.
+    let (from, to) = (pin(&mut h, "in:a", true, 0), pin(&mut h, "add16_1", false, 0));
+    drag(&mut h, from, to);
+    h.get_by_label("add16_1.a[12:0]").click();
+    h.run_steps(3);
+    for (pin_index, item) in [(1, "Set to 1 (0x0001)"), (2, "Set to 0")] {
+        let at = pin(&mut h, "add16_1", false, pin_index);
+        right_click(&mut h, at);
+        h.get_by_label(item).click();
+        h.run_steps(3);
+    }
+    // The low 13 bits of the sum are the answer.
+    let (from, to) = (pin(&mut h, "add16_1", true, 0), pin(&mut h, "out:out", false, 0));
+    drag(&mut h, from, to);
+    h.get_by_label("add16_1.sum[12:0]").click();
+    h.run_steps(3);
+    shot(&mut h, "inc13");
+
+    let text = chip_text(&dir, "Inc13.chip");
+    for line in ["add16_1 = Add16({0b000, a}, 1, 0)", "out = add16_1.sum[12:0]"] {
+        assert!(text.contains(line), "missing `{line}`:\n{text}");
+    }
+    let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "Inc13");
+    assert!(results.passed(), "Inc13's tests fail:\n{text}");
+}
