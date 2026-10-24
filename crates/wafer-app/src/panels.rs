@@ -395,6 +395,7 @@ fn chip_overview(ui: &mut egui::Ui, state: &mut AppState) {
     for (key, what) in [
         ("Shift+A", "add a gate, chip or port"),
         ("drag pin → pin", "draw a wire"),
+        ("Option-drag", "wire just some bits"),
         ("click input", "flip it"),
         ("G", "move selection"),
         ("Shift+D", "duplicate"),

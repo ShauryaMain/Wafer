@@ -559,7 +559,8 @@ impl Canvas {
                 Some(Drag::Wire { from }) => {
                     let target =
                         pointer.or(response.interact_pointer_pos()).map_or(Hit::Empty, |p| self.hit_test(s, p));
-                    self.finish_wire(s, ws, from, target);
+                    let choose = ui.input(|i| i.modifiers.alt);
+                    self.finish_wire(s, ws, from, target, choose);
                 }
                 None => {}
             }
@@ -658,7 +659,9 @@ impl Canvas {
         ws.move_nodes(&self.chip, positions);
     }
 
-    fn finish_wire(&mut self, s: &Schematic, ws: &mut Workspace, from: Hit, to: Hit) {
+    /// Connects a dropped wire, or asks which bits it carries. `choose`
+    /// (Option/Alt held) always asks, with every bit free to pick.
+    fn finish_wire(&mut self, s: &Schematic, ws: &mut Workspace, from: Hit, to: Hit, choose: bool) {
         let (source, sink) = match (from, to) {
             (Hit::OutPin(n, p), Hit::InPin(m, q)) | (Hit::InPin(m, q), Hit::OutPin(n, p)) => ((n, p), (m, q)),
             (_, Hit::Empty) | (_, Hit::Wire(_)) | (_, Hit::Node(_)) => return,
@@ -683,7 +686,7 @@ impl Canvas {
         let (Some(sink), Some(source)) = (sink_of(s, sink.0, sink.1), source_text(s, source.0, source.1)) else {
             return;
         };
-        if sink_width == source_width || adapts || feeds_every_copy {
+        if !choose && (sink_width == source_width || adapts || feeds_every_copy) {
             ws.edit(&self.chip, &[Edit::Connect { sink, source }], &[]);
             return;
         }
@@ -691,13 +694,121 @@ impl Canvas {
             Sink::Instance { name, port } => format!("{name}.{port}"),
             Sink::Output(name) => name.clone(),
         };
-        self.bit_picker = Some(BitPicker { sink, sink_label, sink_width, source, source_width, screen: at, custom: 0 });
+        // Free picking starts with as much of the source as fits, at bit 0.
+        let take = source_width.min(sink_width).max(1);
+        let free = choose.then_some(FreePick { hi: take - 1, lo: 0, at: 0 });
+        self.bit_picker =
+            Some(BitPicker { sink, sink_label, sink_width, source, source_width, screen: at, custom: 0, free });
+    }
+
+    /// Picks any bits of the source and where they land in the pin.
+    pub fn choose_bits(&mut self, hi: usize, lo: usize, at: usize) {
+        if let Some(picker) = &mut self.bit_picker {
+            picker.free = Some(FreePick { hi, lo, at });
+        }
+    }
+
+    /// The free side of the bit picker. Returns the edit to make, if any.
+    fn free_pick_ui(ui: &mut egui::Ui, picker: &mut BitPicker) -> Option<Edit> {
+        let (sw, kw) = (picker.source_width, picker.sink_width);
+        let mut chosen = None;
+        let mut pick = picker.free.unwrap_or(FreePick { hi: 0, lo: 0, at: 0 });
+        ui.label(format!("Wire bits of {} into {}", picker.source, picker.sink_label));
+        if sw == kw && sw > 1 {
+            // Shifts, the usual reason to wire bits by hand.
+            ui.horizontal_wrapped(|ui| {
+                for k in [1, 2, 4, 8].into_iter().filter(|&k| k < sw) {
+                    if ui.button(egui::RichText::new(format!("<< {k}")).monospace()).clicked() {
+                        chosen = Some(FreePick { hi: sw - 1 - k, lo: 0, at: k });
+                    }
+                }
+                for k in [1, 2, 4, 8].into_iter().filter(|&k| k < sw) {
+                    if ui.button(egui::RichText::new(format!(">> {k}")).monospace()).clicked() {
+                        chosen = Some(FreePick { hi: sw - 1, lo: k, at: 0 });
+                    }
+                }
+            });
+        }
+        ui.horizontal(|ui| {
+            ui.label("take");
+            ui.label(egui::RichText::new(format!("{}[", picker.source)).monospace());
+            ui.add(egui::DragValue::new(&mut pick.hi).range(0..=sw - 1));
+            ui.label(egui::RichText::new(":").monospace());
+            ui.add(egui::DragValue::new(&mut pick.lo).range(0..=sw - 1));
+            ui.label(egui::RichText::new("]").monospace());
+        });
+        ui.horizontal(|ui| {
+            ui.label("into");
+            ui.label(egui::RichText::new(&picker.sink_label).monospace());
+            ui.label("from bit");
+            ui.add(egui::DragValue::new(&mut pick.at).range(0..=kw - 1));
+        });
+        picker.free = Some(pick);
+        let n = pick.hi.checked_sub(pick.lo).map(|d| d + 1);
+        match n {
+            Some(n) if pick.at + n <= kw => {
+                let to = if n == 1 { format!("[{}]", pick.at) } else { format!("[{}:{}]", pick.at + n - 1, pick.at) };
+                let from = if n == 1 { format!("[{}]", pick.lo) } else { format!("[{}:{}]", pick.hi, pick.lo) };
+                ui.label(
+                    egui::RichText::new(format!("{}{to} ← {}{from}", picker.sink_label, picker.source))
+                        .monospace()
+                        .color(theme::BUS),
+                );
+                ui.label(egui::RichText::new("Bits you don't wire read 0.").color(theme::MUTED).small());
+                if ui.button("Connect").clicked() {
+                    chosen = Some(pick);
+                }
+            }
+            Some(n) => {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "That's {n} bits, but {} has only {} from bit {} up.",
+                        picker.sink_label,
+                        kw - pick.at,
+                        pick.at
+                    ))
+                    .color(theme::UNKNOWN),
+                );
+            }
+            None => {
+                ui.label(egui::RichText::new("The first bit has to be the higher one.").color(theme::UNKNOWN));
+            }
+        }
+        let pick = chosen?;
+        let n = pick.hi - pick.lo + 1;
+        let source = match (pick.hi, pick.lo) {
+            (hi, 0) if hi + 1 == sw => picker.source.clone(),
+            (hi, lo) if hi == lo => format!("{}[{lo}]", picker.source),
+            (hi, lo) => format!("{}[{hi}:{lo}]", picker.source),
+        };
+        Some(Edit::ConnectBits { sink: picker.sink.clone(), hi: pick.at + n - 1, lo: pick.at, source })
     }
 
     /// Which bits a wire between pins of different widths carries: a
     /// slice of the wider source, or a slice of the wider pin it fills.
     fn bit_picker_ui(&mut self, ui: &mut egui::Ui, ws: &mut Workspace) {
         let Some(picker) = &mut self.bit_picker else { return };
+        if picker.free.is_some() {
+            let (mut edit, mut close) = (None, false);
+            egui::Area::new(egui::Id::new("bit_picker")).fixed_pos(picker.screen).order(egui::Order::Foreground).show(
+                ui.ctx(),
+                |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_max_width(340.0);
+                        edit = Self::free_pick_ui(ui, picker);
+                        close |= ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape));
+                    });
+                },
+            );
+            if let Some(edit) = edit {
+                ws.edit(&self.chip, &[edit], &[]);
+                close = true;
+            }
+            if close {
+                self.bit_picker = None;
+            }
+            return;
+        }
         let wide_source = picker.source_width > picker.sink_width;
         // The narrow side fits somewhere in the wide side: these are the
         // places it lines up with, lowest first.
@@ -712,7 +823,7 @@ impl Canvas {
         }
         let wide = if wide_source { picker.source.clone() } else { picker.sink_label.clone() };
         let bits = |lo: usize| if n == 1 { format!("{wide}[{lo}]") } else { format!("{wide}[{}:{lo}]", lo + n - 1) };
-        let (mut chosen, mut close) = (None, false);
+        let (mut chosen, mut close, mut free) = (None, false, false);
         egui::Area::new(egui::Id::new("bit_picker")).fixed_pos(picker.screen).order(egui::Order::Foreground).show(
             ui.ctx(),
             |ui| {
@@ -751,10 +862,24 @@ impl Canvas {
                             chosen = Some(picker.custom);
                         }
                     });
-                    close |= ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape));
+                    ui.horizontal(|ui| {
+                        close |= ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape));
+                        if ui
+                            .small_button("Choose bits freely…")
+                            .on_hover_text("Or hold Option (Alt) as you drop a wire")
+                            .clicked()
+                        {
+                            free = true;
+                        }
+                    });
                 });
             },
         );
+        if free {
+            let take = picker.source_width.min(picker.sink_width).max(1);
+            picker.free = Some(FreePick { hi: take - 1, lo: 0, at: 0 });
+            return;
+        }
         if let Some(lo) = chosen {
             let hi = lo + n - 1;
             let edit = if wide_source {
@@ -1399,6 +1524,16 @@ struct BitPicker {
     screen: Pos2,
     /// The lowest bit, for a range that isn't one of the buttons.
     custom: usize,
+    /// Picking any bits of the source and where they land (Option-drop).
+    free: Option<FreePick>,
+}
+
+/// Bits `hi..lo` of the source, landing in the pin from bit `at` up.
+#[derive(Clone, Copy)]
+struct FreePick {
+    hi: usize,
+    lo: usize,
+    at: usize,
 }
 
 /// True when a pin (an input, or the output for `None`) takes its width

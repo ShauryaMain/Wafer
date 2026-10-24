@@ -331,10 +331,11 @@ The spec is [docs/crumb.md](docs/crumb.md): memory map, instruction encoding, th
   - **First (Claude): the canvas has to do everything the parts need.** Right now picking bits out of a bus (`a[7:0]`) or joining buses (`{hi, lo}`) only works in the Code tab, and Add16 needs both. Fix gaps like this before the user starts, and fix new ones as they turn up.
     - ✅ Done 2026-10-24: dropping a wire between pins of different widths asks which bits. A wide source gives a slice (`lo = Add8(a[7:0])`); a narrow source fills part of the pin (`sum[7:0] = lo.sum`, and once every bit is filled, `sum = {hi.sum, lo.sum}`). Deleting one wire of a joined bus leaves the others, and each piece of a join is labeled with the bits it fills (`→[15:8]`).
     - ✅ Done 2026-10-24: chips whose ports are all 1 bit work on buses (see "Chips on buses" in round 4). The copies come from the first bus wired in, a 1-bit input feeds every copy, the box reads `Xor ×16`, and inside it every signal (and every wire on the canvas) is 16 bits wide. Wiring a bus into a fresh one makes it that wide without asking which bit.
+    - ✅ Done 2026-10-24, for Shift16: hold Option (Alt) while dropping a wire to pick any bits of the source and where they land in the pin, with `<< 1/2/4/8` and `>> 1/2/4/8` shortcuts. Bits you don't wire read 0, which is how the canvas makes constants for now.
   - **The parts, in build order.** For each, Claude writes the tests and the user builds it:
     1. `Add16`: two `Add8`s. ✅ Built by the user on 2026-10-24; all 8 tests pass.
     2. `Register16`: holds 16 bits, loads on a tick when `load` is 1, and clears on a tick when `reset` is 1. ✅ Built by the user on 2026-10-24 from two `Register8`s, loading zeros on reset through an `And ×16`; all 7 tests pass.
-    3. `Shift16`: shifts left or right by 0 to 15 places.
+    3. `Shift16`: shifts by 0 to 15 places, with `left` and `right` outputs (ALU16 uses one for `lshift`, the other for `rshift`). ✅ Built by the user on 2026-10-24: two barrel-shifter chains of four Muxes; all 12 tests pass.
     4. `Compare16`: equal, less than (signed) and less than (unsigned), as Forth flags.
     5. `ALU16`: all 16 operations, with `op` picking the result.
     6. `Inc13`: the program counter's +1.

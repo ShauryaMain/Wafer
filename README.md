@@ -29,6 +29,7 @@ anything else changes them, so you can edit text and boxes side by side.
 |---|---|
 | Shift+A | Add a gate, chip, input or output (type to search) |
 | Drag from a pin | Draw a wire to another pin. Between pins of different widths it asks which bits, like `a[7:0]` |
+| Option-drag (Alt) | Wire just some bits, anywhere in the pin: `<< 1` gives `{a[14:0], 0b0}`. Bits you don't wire read 0 |
 | Click an input | Flip it between 0 and 1 |
 | Drag / G | Move the selection (G: it follows the pointer; click to drop) |
 | Shift+D | Duplicate |

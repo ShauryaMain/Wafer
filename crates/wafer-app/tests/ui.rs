@@ -772,3 +772,81 @@ fn builds_register16_from_two_register8s() {
     let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "Register16");
     assert!(results.passed(), "Register16's tests fail:\n{text}");
 }
+
+/// Builds Shift16 on the canvas the way the guide in the chat says to.
+#[test]
+fn builds_shift16_with_option_drags() {
+    let dir = example_project("shift16");
+    // Start from the empty chip, whatever chips/ holds now.
+    let real = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../chips/Shift16.chip")).unwrap();
+    let tests = &real[real.find("test Shift16").unwrap()..];
+    let start = "chip Shift16 {\n  in  a[16], by[4]\n  out left[16], right[16]\n}\n\n";
+    std::fs::write(dir.join("Shift16.chip"), format!("{start}{tests}")).unwrap();
+    let _ = std::fs::remove_file(dir.join("Shift16.layout.json"));
+    let mut h = open(&dir);
+    h.state_mut().state.open_chip("Shift16");
+    h.run_steps(3);
+
+    // Step 1: eight Muxes, left chain on top and right chain below.
+    let c = h.state().state.canvas.rect().center();
+    for (i, x) in [-240.0, -80.0, 80.0, 240.0].into_iter().enumerate() {
+        add(&mut h, c + vec2(x, -120.0), "Mux");
+        add(&mut h, c + vec2(x, 120.0), "Mux");
+        assert!(keys(&h).contains(&format!("mux{}", 2 * i + 2)));
+    }
+    h.hover_at(c);
+    h.run_steps(1);
+    h.key_press(Key::F);
+    h.run_steps(3);
+
+    let wire = |h: &mut Harness<'static, WaferApp>, from: &str, to: &str, pin_index: usize, option: bool| {
+        let (a, b) = (pin(h, from, true, 0), pin(h, to, false, pin_index));
+        if option {
+            h.event(Event::ModifiersChanged(Modifiers::ALT));
+        }
+        drag(h, a, b);
+        h.event(Event::ModifiersChanged(Modifiers::NONE));
+        h.run_steps(1);
+    };
+    let click = |h: &mut Harness<'static, WaferApp>, label: &str| {
+        h.get_by_label(label).click();
+        h.run_steps(3);
+    };
+    // Steps 2 and 3: each stage passes its input, or shifts it, picked by one bit of `by`.
+    // Adding alternated top and bottom: mux1, 3, 5, 7 are the left chain.
+    let left = [("in:a", "mux1", 1, 0), ("mux1", "mux3", 2, 1), ("mux3", "mux5", 4, 2), ("mux5", "mux7", 8, 3)];
+    let right = [("in:a", "mux2", 1, 0), ("mux2", "mux4", 2, 1), ("mux4", "mux6", 4, 2), ("mux6", "mux8", 8, 3)];
+    for (stages, arrow) in [(left, "<<"), (right, ">>")] {
+        for (input, mux, shift, bit) in stages {
+            wire(&mut h, input, mux, 0, false);
+            wire(&mut h, input, mux, 1, true);
+            assert!(h.state().state.canvas.bit_picker_open(), "Option-drop asks which bits");
+            if mux == "mux1" {
+                shot(&mut h, "free_bit_picker");
+            }
+            click(&mut h, &format!("{arrow} {shift}"));
+            wire(&mut h, "in:by", mux, 2, false);
+            click(&mut h, &format!("by[{bit}]"));
+        }
+    }
+    // Step 4: the ends of the chains are the outputs.
+    wire(&mut h, "mux7", "out:left", 0, false);
+    wire(&mut h, "mux8", "out:right", 0, false);
+    shot(&mut h, "shift16");
+
+    let text = chip_text(&dir, "Shift16.chip");
+    for line in [
+        "mux1 = Mux(a, {a[14:0], 0b0}, by[0])",
+        "mux3 = Mux(mux1, {mux1[13:0], 0b00}, by[1])",
+        "mux5 = Mux(mux3, {mux3[11:0], 0x0}, by[2])",
+        "mux7 = Mux(mux5, {mux5[7:0], 0x00}, by[3])",
+        "mux2 = Mux(a, {0b0, a[15:1]}, by[0])",
+        "mux8 = Mux(mux6, {0x00, mux6[15:8]}, by[3])",
+        "left = mux7",
+        "right = mux8",
+    ] {
+        assert!(text.contains(line), "missing `{line}`:\n{text}");
+    }
+    let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "Shift16");
+    assert!(results.passed(), "Shift16's tests fail:\n{text}");
+}
