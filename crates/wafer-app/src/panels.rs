@@ -71,7 +71,7 @@ pub fn chips(ui: &mut egui::Ui, state: &mut AppState) {
 }
 
 fn has_chips_inside(design: &wafer_core::Design, chip: &str) -> bool {
-    design.chips.get(chip).is_some_and(|info| info.instances.iter().any(|i| matches!(i.callee, Callee::Chip(_))))
+    design.chips.get(chip).is_some_and(|info| info.instances.iter().any(|i| matches!(i.callee, Callee::Chip { .. })))
 }
 
 /// One level of the hierarchy tree. Gates are left out; chips can be
@@ -89,7 +89,7 @@ fn tree(
         return;
     }
     for inst in &info.instances {
-        let Callee::Chip(child) = &inst.callee else { continue };
+        let Callee::Chip { name: child, .. } = &inst.callee else { continue };
         path.push((inst.name.clone(), child.clone()));
         let here = path.as_slice() == current;
         let label = mono(format!("{} · {child}", inst.name));
@@ -174,7 +174,10 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState, s: &wafer_core::schem
             (if *width == 1 { "Output".to_string() } else { format!("Output · {width} bits") }, name.clone())
         }
         NodeKind::Gate { name, kind, .. } => (format!("{} · {}", kind.name(), kind.describe()), name.clone()),
-        NodeKind::Chip { name, chip } => (format!("{chip} chip"), name.clone()),
+        NodeKind::Chip { name, chip, copies: 1 } => (format!("{chip} chip"), name.clone()),
+        NodeKind::Chip { name, chip, copies } => {
+            (format!("{chip} chip · {copies} side by side, one per bit"), name.clone())
+        }
     };
     heading(ui, &kind.to_uppercase());
 

@@ -380,7 +380,19 @@ impl Builder<'_> {
                         self.gates.push(Gate { kind: *kind, a: pick(0), b: pick(1), c: pick(2), out: out[0][bit] });
                     }
                 }
-                Callee::Chip(callee) => {
+                Callee::Chip { name: callee, copies } if *copies > 1 => {
+                    // One copy per bit. A 1-bit input feeds every copy.
+                    let inner = format!("{prefix}{}.", inst.name);
+                    let start = self.signals.len();
+                    for bit in 0..*copies {
+                        let pick = |nets: &Vec<NetId>| vec![nets[if nets.len() == 1 { 0 } else { bit }]];
+                        let ins: Vec<Vec<NetId>> = args.iter().map(pick).collect();
+                        let outs: Vec<Vec<NetId>> = instance_outputs[k].iter().map(pick).collect();
+                        self.instantiate(callee, &inner, &ins, &outs, depth + 1)?;
+                    }
+                    self.merge_copies(start, *copies);
+                }
+                Callee::Chip { name: callee, .. } => {
                     let inner = format!("{prefix}{}.", inst.name);
                     self.instantiate(callee, &inner, &args, &instance_outputs[k], depth + 1)?;
                 }
@@ -406,6 +418,21 @@ impl Builder<'_> {
             }
         }
         Ok(())
+    }
+
+    /// The copies of a chip repeated across a bus each named the same
+    /// signals inside it; join each one's bits (copy 0 is bit 0) so that
+    /// inside, every signal is as wide as the bus.
+    fn merge_copies(&mut self, start: usize, copies: usize) {
+        let added = self.signals.split_off(start);
+        let each = added.len() / copies;
+        for i in 0..each {
+            let mut signal = added[i].clone();
+            for copy in 1..copies {
+                signal.nets.extend_from_slice(&added[copy * each + i].nets);
+            }
+            self.signals.push(signal);
+        }
     }
 
     fn name_signals(&mut self, scope: &Scope, prefix: &str, depth: usize) {

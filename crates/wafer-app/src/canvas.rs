@@ -11,6 +11,7 @@ use egui::{
 };
 use wafer_core::GateKind;
 use wafer_core::edit::{Edit, PortDir, Sink, fresh_name};
+use wafer_core::gate::PortWidth;
 use wafer_core::logic::{Logic, format_bits};
 use wafer_core::schematic::{self, GATE_W, NodeKind, PORT_H, Schematic, TagKind, port_label};
 
@@ -72,6 +73,9 @@ pub struct Canvas {
     pub prefix: String,
     /// The Make Chip dialog's name field, while it's open.
     make_chip: Option<(String, bool)>,
+    /// Asking which bits a wire carries, after one was dropped between
+    /// pins of different widths.
+    bit_picker: Option<BitPicker>,
     offset: Vec2,
     zoom: f32,
     pub selection: BTreeSet<String>,
@@ -100,6 +104,7 @@ impl Canvas {
             path: Vec::new(),
             prefix: String::new(),
             make_chip: None,
+            bit_picker: None,
             chip,
             offset: Vec2::ZERO,
             zoom: 1.0,
@@ -156,6 +161,7 @@ impl Canvas {
         self.moving.clear();
         self.add_menu = None;
         self.make_chip = None;
+        self.bit_picker = None;
     }
 
     /// Drops levels of the path that no longer exist after an edit.
@@ -164,9 +170,10 @@ impl Canvas {
         let mut keep = 0;
         for (instance, child) in &self.path {
             let still_there = ws.design.chips.get(&chip).is_some_and(|info| {
-                info.instances
-                    .iter()
-                    .any(|i| &i.name == instance && i.callee == wafer_core::check::Callee::Chip(child.clone()))
+                info.instances.iter().any(|i| {
+                    &i.name == instance
+                        && matches!(&i.callee, wafer_core::check::Callee::Chip { name, .. } if name == child)
+                })
             });
             if !still_there {
                 break;
@@ -182,16 +189,35 @@ impl Canvas {
 
     /// A signal's value for the chip on screen (inside a dive, that's the
     /// value inside that particular box).
+    /// How many copies of the chip on screen run side by side: more than 1
+    /// inside a 1-bit chip used on a bus (`Xor ×16`), multiplied down the
+    /// path when those are nested.
+    pub fn copies(&self, ws: &Workspace) -> usize {
+        let mut parent = self.root.clone();
+        let mut copies = 1;
+        for (instance, child) in &self.path {
+            let inst = ws.design.chips.get(&parent).and_then(|c| c.instances.iter().find(|i| &i.name == instance));
+            if let Some(wafer_core::check::Callee::Chip { copies: n, .. }) = inst.map(|i| &i.callee) {
+                copies *= (*n).max(1);
+            }
+            parent = child.clone();
+        }
+        copies
+    }
+
     fn val(&self, sim: &SimRunner, name: &str) -> Option<Vec<Logic>> {
         sim.value(&format!("{}{name}", self.prefix))
     }
 
     /// The laid-out chip, rebuilt only when something changed.
     pub fn schematic(&mut self, ws: &Workspace) -> Option<&Schematic> {
-        let fresh = matches!(&self.cache, Some((chip, g, lg, _)) if *chip == self.chip && *g == ws.generation && *lg == ws.layout_generation);
+        // The same chip looks different inside `Xor ×16`, so the key says how many copies.
+        let copies = self.copies(ws);
+        let key = format!("{}×{copies}", self.chip);
+        let fresh = matches!(&self.cache, Some((k, g, lg, _)) if *k == key && *g == ws.generation && *lg == ws.layout_generation);
         if !fresh || !self.moving.is_empty() {
-            let built = build_schematic(ws, &self.chip, &self.moving)?;
-            self.cache = Some((self.chip.clone(), ws.generation, ws.layout_generation, built));
+            let built = build_schematic(ws, &self.chip, &self.moving, copies)?;
+            self.cache = Some((key, ws.generation, ws.layout_generation, built));
         }
         self.cache.as_ref().map(|(_, _, _, s)| s)
     }
@@ -291,6 +317,9 @@ impl Canvas {
             self.context = hit;
         }
         response.context_menu(|ui| self.context_menu(ui, &schematic, ws, sim));
+        if response.clicked() || response.drag_started() {
+            self.bit_picker = None;
+        }
 
         self.draw(&painter, &schematic, sim, hit);
         self.add_menu_ui(ui, ws);
@@ -303,6 +332,7 @@ impl Canvas {
             response.on_hover_text_at_pointer(format!("{} = {value}", wire.signal));
         }
         self.make_chip_dialog(ui, ws);
+        self.bit_picker_ui(ui, ws);
     }
 
     /// `Add4 › fa0 · FullAdder › h1 · HalfAdder`: click a level to go back to it.
@@ -539,7 +569,7 @@ impl Canvas {
         if response.double_clicked() {
             match response.interact_pointer_pos().map_or(Hit::Empty, |p| self.hit_test(s, p)) {
                 Hit::Node(i) => {
-                    if let NodeKind::Chip { name, chip } = &s.nodes[i].kind
+                    if let NodeKind::Chip { name, chip, .. } = &s.nodes[i].kind
                         && ws.design.chips.contains_key(chip)
                     {
                         let (name, chip) = (name.clone(), chip.clone());
@@ -637,10 +667,113 @@ impl Canvas {
                 return;
             }
         };
+        let (Some(sink_pin), Some(source_pin)) =
+            (s.nodes[sink.0].inputs.get(sink.1), s.nodes[source.0].outputs.get(source.1))
+        else {
+            return;
+        };
+        // Inside `Xor ×16` everything is drawn 16 times wider than the text it edits.
+        let shown = self.copies(ws).max(1);
+        let (sink_width, source_width) = (sink_pin.width / shown, source_pin.width / shown);
+        let at = self.screen_pos((sink_pin.x, sink_pin.y)) + vec2(14.0, -12.0);
+        let adapts = adapts_to_wire(ws, &self.chip, &s.nodes[sink.0], Some(sink.1))
+            || adapts_to_wire(ws, &self.chip, &s.nodes[source.0], None);
+        // A 1-bit signal feeds every copy of a chip spread across a bus.
+        let feeds_every_copy = source_width == 1 && copies_of(ws, &self.chip, &s.nodes[sink.0]) > 1;
         let (Some(sink), Some(source)) = (sink_of(s, sink.0, sink.1), source_text(s, source.0, source.1)) else {
             return;
         };
-        ws.edit(&self.chip, &[Edit::Connect { sink, source }], &[]);
+        if sink_width == source_width || adapts || feeds_every_copy {
+            ws.edit(&self.chip, &[Edit::Connect { sink, source }], &[]);
+            return;
+        }
+        let sink_label = match &sink {
+            Sink::Instance { name, port } => format!("{name}.{port}"),
+            Sink::Output(name) => name.clone(),
+        };
+        self.bit_picker = Some(BitPicker { sink, sink_label, sink_width, source, source_width, screen: at, custom: 0 });
+    }
+
+    /// Which bits a wire between pins of different widths carries: a
+    /// slice of the wider source, or a slice of the wider pin it fills.
+    fn bit_picker_ui(&mut self, ui: &mut egui::Ui, ws: &mut Workspace) {
+        let Some(picker) = &mut self.bit_picker else { return };
+        let wide_source = picker.source_width > picker.sink_width;
+        // The narrow side fits somewhere in the wide side: these are the
+        // places it lines up with, lowest first.
+        let (n, total) = if wide_source {
+            (picker.sink_width, picker.source_width)
+        } else {
+            (picker.source_width, picker.sink_width)
+        };
+        let mut starts: Vec<usize> = (0..).map(|k| k * n).take_while(|lo| lo + n <= total).collect();
+        if total % n != 0 {
+            starts.push(total - n);
+        }
+        let wide = if wide_source { picker.source.clone() } else { picker.sink_label.clone() };
+        let bits = |lo: usize| if n == 1 { format!("{wide}[{lo}]") } else { format!("{wide}[{}:{lo}]", lo + n - 1) };
+        let (mut chosen, mut close) = (None, false);
+        egui::Area::new(egui::Id::new("bit_picker")).fixed_pos(picker.screen).order(egui::Order::Foreground).show(
+            ui.ctx(),
+            |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_max_width(320.0);
+                    let question = if wide_source {
+                        format!(
+                            "{} takes {n} bit{} of {}'s {total}. Which?",
+                            picker.sink_label,
+                            if n == 1 { "" } else { "s" },
+                            picker.source
+                        )
+                    } else {
+                        format!(
+                            "{} is {n} bit{}. Which bits of {} does it fill?",
+                            picker.source,
+                            if n == 1 { "" } else { "s" },
+                            picker.sink_label
+                        )
+                    };
+                    ui.label(question);
+                    if starts.len() <= 32 {
+                        ui.horizontal_wrapped(|ui| {
+                            // Highest bits first, the way a bus reads.
+                            for &lo in starts.iter().rev() {
+                                if ui.button(egui::RichText::new(bits(lo)).monospace()).clicked() {
+                                    chosen = Some(lo);
+                                }
+                            }
+                        });
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Or starting at bit").color(theme::MUTED));
+                        ui.add(egui::DragValue::new(&mut picker.custom).range(0..=total - n));
+                        if ui.button("Connect").clicked() {
+                            chosen = Some(picker.custom);
+                        }
+                    });
+                    close |= ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape));
+                });
+            },
+        );
+        if let Some(lo) = chosen {
+            let hi = lo + n - 1;
+            let edit = if wide_source {
+                let source =
+                    if n == 1 { format!("{}[{lo}]", picker.source) } else { format!("{}[{hi}:{lo}]", picker.source) };
+                Edit::Connect { sink: picker.sink.clone(), source }
+            } else {
+                Edit::ConnectBits { sink: picker.sink.clone(), hi, lo, source: picker.source.clone() }
+            };
+            ws.edit(&self.chip, &[edit], &[]);
+            close = true;
+        }
+        if close {
+            self.bit_picker = None;
+        }
+    }
+
+    pub fn bit_picker_open(&self) -> bool {
+        self.bit_picker.is_some()
     }
 
     fn handle_keys(&mut self, ui: &egui::Ui, s: &Schematic, ws: &mut Workspace, pointer: Option<Pos2>) {
@@ -665,7 +798,7 @@ impl Canvas {
         }
         if dive
             && let [key] = self.selection.iter().collect::<Vec<_>>().as_slice()
-            && let Some(NodeKind::Chip { name, chip }) = s.nodes.iter().find(|n| &n.key == *key).map(|n| &n.kind)
+            && let Some(NodeKind::Chip { name, chip, .. }) = s.nodes.iter().find(|n| &n.key == *key).map(|n| &n.kind)
             && ws.design.chips.contains_key(chip)
         {
             let (name, chip) = (name.clone(), chip.clone());
@@ -716,8 +849,14 @@ impl Canvas {
         if let Some(id) = &self.selected_wire
             && let Some(wire) = s.wires.iter().find(|w| s.nodes[w.source.0].key == id.node && w.source.1 == id.pin)
         {
-            edits
-                .extend(wire.sinks.iter().filter_map(|&(n, p)| sink_of(s, n, p)).map(|sink| Edit::Disconnect { sink }));
+            // Only the bits this wire carries: the rest of a joined bus stays.
+            let source = source_text(s, wire.source.0, wire.source.1).unwrap_or_default();
+            edits.extend(
+                wire.sinks
+                    .iter()
+                    .filter_map(|&(n, p)| sink_of(s, n, p))
+                    .map(|sink| Edit::DisconnectSource { sink, source: source.clone() }),
+            );
         }
         if !edits.is_empty() && ws.edit(&self.chip, &edits, &[]) {
             self.selection.clear();
@@ -981,7 +1120,9 @@ impl Canvas {
                         theme::MUTED,
                     );
                 }
-                NodeKind::Chip { name, chip } => self.block(painter, node, at, size, chip, name, false),
+                NodeKind::Chip { name, chip, copies } => {
+                    self.block(painter, node, at, size, &schematic::chip_title(chip, *copies), name, false)
+                }
             }
             if self.selection.contains(&node.key) {
                 let r = Rect::from_min_size(at, size).expand(5.0 * z);
@@ -1207,20 +1348,25 @@ pub enum AddItem {
 
 /// Lays out a chip from its saved positions (plus any boxes mid-move), or
 /// automatically if it has never been arranged by hand.
-fn build_schematic(ws: &Workspace, chip: &str, moving: &HashMap<String, (f32, f32)>) -> Option<Schematic> {
+fn build_schematic(
+    ws: &Workspace,
+    chip: &str,
+    moving: &HashMap<String, (f32, f32)>,
+    copies: usize,
+) -> Option<Schematic> {
     let sources = &ws.project.sources;
     match ws.positions(chip) {
         Some(mut saved) => {
             saved.extend(moving.iter().map(|(k, v)| (k.clone(), *v)));
-            schematic::arrange(&ws.design, sources, chip, &saved)
+            schematic::arrange_copies(&ws.design, sources, chip, &saved, copies)
         }
-        None if moving.is_empty() => schematic::layout(&ws.design, sources, chip),
+        None if moving.is_empty() => schematic::layout_copies(&ws.design, sources, chip, copies),
         None => {
-            let auto = schematic::layout(&ws.design, sources, chip)?;
+            let auto = schematic::layout_copies(&ws.design, sources, chip, copies)?;
             let mut positions: HashMap<String, (f32, f32)> =
                 auto.nodes.iter().map(|n| (n.key.clone(), (n.x, n.y))).collect();
             positions.extend(moving.iter().map(|(k, v)| (k.clone(), *v)));
-            schematic::arrange(&ws.design, sources, chip, &positions)
+            schematic::arrange_copies(&ws.design, sources, chip, &positions, copies)
         }
     }
 }
@@ -1239,6 +1385,60 @@ fn gate_mesh(kind: GateKind) -> &'static (GateShape, Vec<u32>) {
             .collect()
     });
     &meshes[GateKind::ALL.iter().position(|&k| k == kind).unwrap_or(0)]
+}
+
+/// A wire dropped between pins of different widths.
+struct BitPicker {
+    sink: Sink,
+    /// The pin as the question names it: `sum`, or `lo.a`.
+    sink_label: String,
+    sink_width: usize,
+    /// As written in the file: `a`, `lo.sum`.
+    source: String,
+    source_width: usize,
+    screen: Pos2,
+    /// The lowest bit, for a range that isn't one of the buttons.
+    custom: usize,
+}
+
+/// True when a pin (an input, or the output for `None`) takes its width
+/// from whatever gets wired to it, because nothing has fixed it yet: wiring
+/// a 16-bit bus into a fresh `Nand()`, or into our own 1-bit `Xor`, makes
+/// it 16 bits wide rather than asking which bit.
+fn adapts_to_wire(ws: &Workspace, chip: &str, node: &schematic::Node, input: Option<usize>) -> bool {
+    let find = |name: &str| ws.design.chips.get(chip).and_then(|c| c.instances.iter().find(|i| i.name == name));
+    if let NodeKind::Chip { name, chip: callee, .. } = &node.kind {
+        // A 1-bit chip spreads across any bus wired into it while it's
+        // still 1 bit wide (other inputs on 1-bit signals just feed every
+        // copy). Its output adapts only before anything is wired in.
+        let Some(inst) = find(name) else { return false };
+        let one = wafer_core::check::Callee::Chip { name: callee.clone(), copies: 1 };
+        let bitwise = wafer_core::check::is_bitwise(&ws.design.signature(&one));
+        return bitwise
+            && match input {
+                Some(_) => copies_of(ws, chip, node) <= 1,
+                None => inst.inputs.iter().all(Option::is_none),
+            };
+    }
+    let NodeKind::Gate { name, kind, .. } = &node.kind else { return false };
+    let Some(inst) = find(name) else {
+        return false;
+    };
+    let group = input.map_or(PortWidth::Bus, |p| kind.port_width(p));
+    if group == PortWidth::Bit || (group == PortWidth::Bus && kind.fixed_width().is_some()) {
+        return false;
+    }
+    !inst.inputs.iter().enumerate().any(|(p, e)| Some(p) != input && e.is_some() && kind.port_width(p) == group)
+}
+
+/// How many copies a chip box runs, as the file says (1 for anything else).
+fn copies_of(ws: &Workspace, chip: &str, node: &schematic::Node) -> usize {
+    let NodeKind::Chip { name, .. } = &node.kind else { return 1 };
+    let inst = ws.design.chips.get(chip).and_then(|c| c.instances.iter().find(|i| &i.name == name));
+    match inst.map(|i| &i.callee) {
+        Some(wafer_core::check::Callee::Chip { copies, .. }) => (*copies).max(1),
+        _ => 1,
+    }
 }
 
 /// The edit-level name for an input pin.

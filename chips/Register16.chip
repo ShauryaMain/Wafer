@@ -1,0 +1,35 @@
+// Holds 16 bits. On each clock tick it loads `d` if `load` is 1 and keeps
+// what it had otherwise; `reset` clears it to 0 on a tick, and wins over
+// `load`. Crumb keeps T, PC and its instruction in registers like this, and
+// `reset` is how they all start at 0.
+chip Register16 {
+  in  d[16], load, reset
+  out out[16]
+  Lo = Register8(and1[7:0], or1)
+  Hi = Register8(and1[15:8], or1)
+  not1 = Not(reset)
+  and1 = And(d, not1)
+  or1 = Or(load, reset)
+  out = {Hi, Lo}
+}
+
+test Register16 {
+  set d = 0x1234, load = 0, reset = 1
+  tick
+  expect out = 0          // reset clears it, even before anything was loaded
+  set reset = 0, load = 1, d = 0xBEEF
+  tick
+  expect out = 0xBEEF
+  set load = 0, d = 0x1234
+  tick
+  expect out = 0xBEEF     // load is 0, so it holds
+  tick 5
+  expect out = 0xBEEF
+  set load = 1
+  expect out = 0xBEEF     // nothing changes until the clock ticks
+  tick
+  expect out = 0x1234
+  set reset = 1
+  tick
+  expect out = 0          // reset beats load
+}

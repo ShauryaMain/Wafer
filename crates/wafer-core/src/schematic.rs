@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::ast::{Expr, ExprKind, Select};
+use crate::ast::{Expr, ExprKind};
 use crate::check::{Callee, ChipInfo, Design, Name, Signature};
 use crate::diag::SourceMap;
 use crate::gate::GateKind;
@@ -57,6 +57,8 @@ pub struct Pin {
     pub name: String,
     pub x: f32,
     pub y: f32,
+    /// How many bits it carries.
+    pub width: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -79,6 +81,8 @@ pub enum NodeKind {
     Chip {
         name: String,
         chip: String,
+        /// More than 1 for a 1-bit chip repeated across a bus.
+        copies: usize,
     },
 }
 
@@ -147,6 +151,17 @@ struct Geom {
     in_off: Vec<f32>,
     out_names: Vec<String>,
     out_off: Vec<f32>,
+    in_widths: Vec<usize>,
+    out_widths: Vec<usize>,
+}
+
+impl Geom {
+    /// Takes the pin widths from what the box is.
+    fn with_widths(mut self, sig: &Signature) -> Geom {
+        self.in_widths = sig.inputs.iter().map(|(_, w)| *w).collect();
+        self.out_widths = sig.outputs.iter().map(|(_, w)| *w).collect();
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -196,11 +211,19 @@ struct Graph<'a> {
     pairs: Vec<(Source, usize)>,
     nin: usize,
     out_base: usize,
+    /// How many copies of this chip run side by side, when it's a 1-bit
+    /// chip used on a bus: every width is that many times wider.
+    copies: usize,
 }
 
 impl<'a> Graph<'a> {
-    fn build(design: &'a Design, sources: &'a SourceMap, chip: &str) -> Option<Graph<'a>> {
+    fn build(design: &'a Design, sources: &'a SourceMap, chip: &str, copies: usize) -> Option<Graph<'a>> {
         let info = design.chips.get(chip)?;
+        let copies = copies.max(1);
+        let wide = |sig: Signature| {
+            let times = |ports: Vec<(String, usize)>| ports.into_iter().map(|(n, w)| (n, w * copies)).collect();
+            Signature { inputs: times(sig.inputs), outputs: times(sig.outputs) }
+        };
         let nin = info.inputs.len();
         let out_base = nin + info.instances.len();
 
@@ -208,9 +231,9 @@ impl<'a> Graph<'a> {
         let mut keys = Vec::new();
         let mut geoms = Vec::new();
         for port in &info.inputs {
-            kinds.push(NodeKind::Input { name: port.name.clone(), width: port.width });
+            kinds.push(NodeKind::Input { name: port.name.clone(), width: port.width * copies });
             keys.push(format!("in:{}", port.name));
-            geoms.push(port_geom(port.width, true));
+            geoms.push(port_geom(port.width * copies, true));
         }
         for inst in &info.instances {
             keys.push(inst.name.clone());
@@ -225,28 +248,29 @@ impl<'a> Graph<'a> {
                         GateKind::Dff if *width > 1 => format!("Dff ×{width}"),
                         _ => kind.name().to_string(),
                     };
-                    let geom = if kind.is_box() {
-                        chip_geom(&label, &design.signature(&inst.callee))
-                    } else {
-                        gate_geom(*kind)
-                    };
+                    let sig = design.signature(&inst.callee);
+                    let geom = if kind.is_box() { chip_geom(&label, &sig) } else { gate_geom(*kind) };
+                    let geom = geom.with_widths(&wide(sig));
                     kinds.push(NodeKind::Gate { name: inst.name.clone(), kind: *kind, label });
                     geoms.push(geom);
                 }
-                Callee::Chip(chip) => {
-                    kinds.push(NodeKind::Chip { name: inst.name.clone(), chip: chip.clone() });
-                    geoms.push(chip_geom(chip, &design.signature(&inst.callee)));
+                Callee::Chip { name: chip, copies: inner } => {
+                    // Inside a repeated chip, what's inside it repeats too.
+                    let copies = inner * copies;
+                    kinds.push(NodeKind::Chip { name: inst.name.clone(), chip: chip.clone(), copies });
+                    let sig = design.signature(&inst.callee);
+                    geoms.push(chip_geom(&chip_title(chip, copies), &sig).with_widths(&wide(sig)));
                 }
                 Callee::Unknown => {
-                    kinds.push(NodeKind::Chip { name: inst.name.clone(), chip: "?".into() });
+                    kinds.push(NodeKind::Chip { name: inst.name.clone(), chip: "?".into(), copies: 1 });
                     geoms.push(chip_geom("?", &Signature::default()));
                 }
             }
         }
         for port in &info.outputs {
-            kinds.push(NodeKind::Output { name: port.name.clone(), width: port.width });
+            kinds.push(NodeKind::Output { name: port.name.clone(), width: port.width * copies });
             keys.push(format!("out:{}", port.name));
-            geoms.push(port_geom(port.width, false));
+            geoms.push(port_geom(port.width * copies, false));
         }
 
         // What feeds each pin.
@@ -255,7 +279,7 @@ impl<'a> Graph<'a> {
         for (k, inst) in info.instances.iter().enumerate() {
             for (pin, expr) in inst.inputs.iter().enumerate() {
                 if let Some(expr) = expr {
-                    sinks.push(Sink { node: nin + k, pin, parts: resolver.resolve(expr, 0) });
+                    sinks.push(Sink { node: nin + k, pin, parts: resolver.filling(expr, 0, "", 0, false) });
                 }
             }
         }
@@ -272,7 +296,7 @@ impl<'a> Graph<'a> {
                 }
             }
         }
-        Some(Graph { resolver, kinds, keys, geoms, sinks, pairs, nin, out_base })
+        Some(Graph { resolver, kinds, keys, geoms, sinks, pairs, nin, out_base, copies })
     }
 
     fn out_pin(&self, positions: &[(f32, f32)], source: Source) -> (f32, f32) {
@@ -310,7 +334,7 @@ impl<'a> Graph<'a> {
             }
             wires.push(Wire {
                 signal,
-                width: bits,
+                width: bits * self.copies,
                 segments,
                 dots,
                 label_at,
@@ -322,8 +346,18 @@ impl<'a> Graph<'a> {
         let mut nodes = Vec::new();
         for (v, &(x, y)) in positions.iter().enumerate() {
             let g = &self.geoms[v];
-            let pins = |names: &[String], offs: &[f32], px: f32| -> Vec<Pin> {
-                names.iter().zip(offs).map(|(name, off)| Pin { name: name.clone(), x: px, y: y + off }).collect()
+            let pins = |names: &[String], offs: &[f32], widths: &[usize], px: f32| -> Vec<Pin> {
+                names
+                    .iter()
+                    .zip(offs)
+                    .enumerate()
+                    .map(|(i, (name, off))| Pin {
+                        name: name.clone(),
+                        x: px,
+                        y: y + off,
+                        width: widths.get(i).copied().unwrap_or(1),
+                    })
+                    .collect()
             };
             nodes.push(Node {
                 key: self.keys[v].clone(),
@@ -332,8 +366,8 @@ impl<'a> Graph<'a> {
                 y,
                 w: g.w,
                 h: g.h,
-                inputs: pins(&g.in_names, &g.in_off, x),
-                outputs: pins(&g.out_names, &g.out_off, x + g.w),
+                inputs: pins(&g.in_names, &g.in_off, &g.in_widths, x),
+                outputs: pins(&g.out_names, &g.out_off, &g.out_widths, x + g.w),
             });
         }
 
@@ -362,7 +396,13 @@ impl<'a> Graph<'a> {
 /// Lays a chip out automatically in columns. Used whenever a chip has no
 /// saved positions.
 pub fn layout(design: &Design, sources: &SourceMap, chip: &str) -> Option<Schematic> {
-    let graph = Graph::build(design, sources, chip)?;
+    layout_copies(design, sources, chip, 1)
+}
+
+/// Like [`layout`], for the inside of a 1-bit chip that's repeated
+/// `copies` times across a bus: every wire is `copies` times wider.
+pub fn layout_copies(design: &Design, sources: &SourceMap, chip: &str, copies: usize) -> Option<Schematic> {
+    let graph = Graph::build(design, sources, chip, copies)?;
     let info = graph.resolver.info;
     let (nin, out_base) = (graph.nin, graph.out_base);
     let (kinds, geoms, sinks, pairs) = (&graph.kinds, &graph.geoms, &graph.sinks, &graph.pairs);
@@ -675,7 +715,18 @@ pub fn arrange(
     chip: &str,
     saved: &HashMap<String, (f32, f32)>,
 ) -> Option<Schematic> {
-    let graph = Graph::build(design, sources, chip)?;
+    arrange_copies(design, sources, chip, saved, 1)
+}
+
+/// Like [`arrange`], for the inside of a repeated chip (see [`layout_copies`]).
+pub fn arrange_copies(
+    design: &Design,
+    sources: &SourceMap,
+    chip: &str,
+    saved: &HashMap<String, (f32, f32)>,
+    copies: usize,
+) -> Option<Schematic> {
+    let graph = Graph::build(design, sources, chip, copies)?;
     let n = graph.kinds.len();
     let mut placed: Vec<Option<(f32, f32)>> = graph.keys.iter().map(|k| saved.get(k).copied()).collect();
     for v in 0..n {
@@ -1083,16 +1134,58 @@ impl Resolver<'_> {
             if assign.target != name {
                 continue;
             }
-            let mut sub = self.resolve(&assign.value, depth);
-            if let Some(select) = assign.select {
-                let target = format!("{}{}", self.name_text(name), bit_text(&select));
-                for part in &mut sub {
-                    part.label = Some(format!("{}→{target}", part.label.as_deref().unwrap_or("")));
-                }
-            }
-            parts.extend(sub);
+            let target = self.name_text(name);
+            let lo = assign.select.map_or(0, |s| s.lo);
+            parts.extend(self.filling(&assign.value, depth, target, lo, assign.select.is_some()));
         }
         parts
+    }
+
+    /// An expression's parts, each labeled with the bits it fills when
+    /// there are several, like `→[15:8]` (or `→sum[15:8]`, naming
+    /// `target`). `lo` is where the expression starts in the target, and
+    /// `whole` labels it even when it's in one piece.
+    fn filling(&self, expr: &Expr, depth: usize, target: &str, lo: usize, whole: bool) -> Vec<Part> {
+        let pieces: Vec<&Expr> = match &expr.kind {
+            ExprKind::Concat(parts) if parts.len() > 1 => parts.iter().rev().collect(),
+            _ if whole => vec![expr],
+            _ => return self.resolve(expr, depth),
+        };
+        let mut out = Vec::new();
+        let mut at = lo;
+        for piece in pieces {
+            let Some(width) = self.expr_width(piece) else { return self.resolve(expr, depth) };
+            let range = if width == 1 { format!("[{at}]") } else { format!("[{}:{at}]", at + width - 1) };
+            let mut sub = self.resolve(piece, depth);
+            for part in sub.iter_mut().filter(|p| p.constant.is_none()) {
+                part.label = Some(format!("{}→{target}{range}", part.label.as_deref().unwrap_or("")));
+            }
+            // Listed high bits first, the way the line reads.
+            out.splice(0..0, sub);
+            at += width;
+        }
+        out
+    }
+
+    fn expr_width(&self, expr: &Expr) -> Option<usize> {
+        match &expr.kind {
+            ExprKind::Literal(lit) => Some(lit.natural_width()),
+            ExprKind::Str(_) => None,
+            ExprKind::Concat(parts) => parts.iter().map(|p| self.expr_width(p)).sum(),
+            ExprKind::Ref { select: Some(select), .. } => Some(select.width()),
+            ExprKind::Ref { base, port, select: None } => match *self.info.names.get(&base.name)? {
+                Name::Input(i) => Some(self.info.inputs[i].width),
+                Name::Output(i) => Some(self.info.outputs[i].width),
+                Name::Wire(i) => Some(self.info.wires[i].width),
+                Name::Instance(k) => {
+                    let sig = self.design.signature(&self.info.instances[k].callee);
+                    match port {
+                        Some(port) => sig.outputs.iter().find(|(n, _)| *n == port.name).map(|(_, w)| *w),
+                        None => sig.outputs.first().map(|(_, w)| *w),
+                    }
+                }
+            },
+        }
     }
 
     fn part(&self, source: Source) -> Part {
@@ -1127,8 +1220,10 @@ impl Resolver<'_> {
     }
 }
 
-fn bit_text(select: &Select) -> String {
-    if select.hi == select.lo { format!("[{}]", select.hi) } else { format!("[{}:{}]", select.hi, select.lo) }
+/// What a chip box says at the top: `Xor`, or `Xor ×16` for a 1-bit
+/// chip repeated across a bus.
+pub fn chip_title(chip: &str, copies: usize) -> String {
+    if copies > 1 { format!("{chip} ×{copies}") } else { chip.to_string() }
 }
 
 /// `a` for one bit, `a[8]` for a bus.
@@ -1144,10 +1239,20 @@ pub fn value_chars(width: usize) -> usize {
 fn port_geom(width: usize, is_input: bool) -> Geom {
     let w = if width == 1 && !is_input { PORT_H } else { (value_chars(width) as f32 * CHAR_W + 16.0).max(28.0) };
     let mid = PORT_H / 2.0;
+    let none = Geom {
+        w,
+        h: PORT_H,
+        in_names: Vec::new(),
+        in_off: Vec::new(),
+        out_names: Vec::new(),
+        out_off: Vec::new(),
+        in_widths: Vec::new(),
+        out_widths: Vec::new(),
+    };
     if is_input {
-        Geom { w, h: PORT_H, in_names: Vec::new(), in_off: Vec::new(), out_names: vec!["".into()], out_off: vec![mid] }
+        Geom { out_names: vec!["".into()], out_off: vec![mid], out_widths: vec![width], ..none }
     } else {
-        Geom { w, h: PORT_H, in_names: vec!["".into()], in_off: vec![mid], out_names: Vec::new(), out_off: Vec::new() }
+        Geom { in_names: vec!["".into()], in_off: vec![mid], in_widths: vec![width], ..none }
     }
 }
 
@@ -1165,6 +1270,8 @@ fn gate_geom(kind: GateKind) -> Geom {
         in_off,
         out_names: vec!["out".into()],
         out_off: vec![GATE_H / 2.0],
+        in_widths: Vec::new(),
+        out_widths: Vec::new(),
     }
 }
 
@@ -1185,5 +1292,7 @@ fn chip_geom(chip: &str, sig: &Signature) -> Geom {
         in_off: offsets(sig.inputs.len()),
         out_names: sig.outputs.iter().map(|(n, _)| n.clone()).collect(),
         out_off: offsets(sig.outputs.len()),
+        in_widths: Vec::new(),
+        out_widths: Vec::new(),
     }
 }

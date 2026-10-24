@@ -1,0 +1,23 @@
+// Adds two 16-bit numbers: Crumb's adder. Build it from two Add8s. The
+// low one adds bits 7..0, the high one adds bits 15..8, and the low one's
+// carry out becomes the high one's carry in.
+chip Add16 {
+  in  a[16], b[16], cin
+  out sum[16], cout
+  Lo = Add8(a[7:0], b[7:0], cin)
+  Hi = Add8(a[15:8], b[15:8], Lo.cout)
+  sum = {Hi.sum, Lo.sum}
+  cout = Hi.cout
+}
+
+test Add16 {
+  // a      b      cin | sum    cout
+     0x0000 0x0000 0   | 0x0000 0
+     0x1234 0x4321 0   | 0x5555 0
+     0x00FF 0x0001 0   | 0x0100 0  // the carry crosses from the low half to the high half
+     0x0F0F 0x0101 1   | 0x1011 0
+     0x7FFF 0x0001 0   | 0x8000 0
+     0xFFFF 0x0001 0   | 0x0000 1  // wraps around, with a carry out
+     0xFFFF 0xFFFF 1   | 0xFFFF 1
+     0xABCD 0x1111 1   | 0xBCDF 0
+}

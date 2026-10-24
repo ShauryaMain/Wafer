@@ -156,7 +156,9 @@ pub fn render(
                 gate(&mut out, theme, *kind, x, y);
                 text(&mut out, x + GATE_W / 2.0, y - 9.0, 11.0, theme.muted, "middle", name);
             }
-            NodeKind::Chip { name, chip } => block(&mut out, theme, node, chip, name, false),
+            NodeKind::Chip { name, chip, copies } => {
+                block(&mut out, theme, node, &crate::schematic::chip_title(chip, *copies), name, false)
+            }
         }
     }
 

@@ -90,6 +90,19 @@ var paddle_y
   then ;
 ```
 
+### Phase 3, round 4: milestone 3b (2026-10-24)
+
+| Topic | Decision |
+|---|---|
+| Gates | Our own, all the way down: our Nand-built And, Or, Xor and Not replace the built-ins everywhere, alongside the built-in Mux, Dff, Ram and Rom. About 3× more gates to simulate; turbo mode (3d) may swap in built-ins wherever it has proven ours identical |
+| Chips | `Crumb` is just the CPU, with a memory bus (address, data in, data out, write) and a `reset` input. `Console` is the board: it wires Crumb to the Rom, RAM, screen and ports |
+| Order | Bottom-up: each part is built and tested on its own, then Crumb, then Console |
+| Who builds | **The user builds the parts on the canvas.** Claude writes each part's tests first (a `.chip` file with the ports and a `test` block, body empty), reviews the result, and helps when a test fails |
+| Timing | 2 ticks per instruction, as in the spec. A stack write lands during the next instruction's fetch tick, when that stack's Ram isn't busy, so each stack is one plain `Ram` |
+| Reset | Crumb has a `reset` input that zeroes `PC`, `T` and both stack pointers, since flip-flops start unknown (X) |
+| Checking | `wafer run prog.asm --gates` runs the program on the gate-level Console and the reference Crumb side by side, and stops at the first instruction where they differ |
+| Chips on buses | (Decided after Add16.) **Any chip whose inputs and outputs are all 1 bit works on buses bit by bit**, the way built-in gates do: `Xor(a, b)` on 16-bit buses is 16 of our Xors side by side. 1-bit inputs feed every copy, and the bus inputs must all be the same width. On the canvas it's one box labelled `Xor ×16`, and inside it's the same circuit with 16-bit wires. HalfAdder and FullAdder work this way too: on buses they're 16 separate adders with no carry between them |
+
 ## Core principles
 
 1. **Instant feedback.** Everything is live: flip an input and watch the signal ripple through.
@@ -314,7 +327,22 @@ The spec is [docs/crumb.md](docs/crumb.md): memory map, instruction encoding, th
     - **A Rom's words are always 16 bits**, Crumb's word size. `.hex` files work too, for machine code that didn't come from our assembler.
     - **The assembler optimizes a little:** a return merges into the instruction before it, a call just before a return becomes a jump (a tail call), and a return nothing can reach is left out.
   - Known limits: the app can show a Rom's program, but it can't run a Crumb program yet. The screen, gamepad and cartridge menu come with the console in 3c.
-- **3b, the CPU in gates.** ALU16, stacks, program counter and control as `.chip` files, each with tests, all built from our own parts. *Done when:* it runs a counting program on the number display.
+- **3b, the CPU in gates.** ALU16, stacks, program counter and control as `.chip` files, each with tests, all built from our own parts. *Done when:* `count.asm` runs on the gate-level Console, showing on the number display, in step with the reference. Then measure its speed.
+  - **First (Claude): the canvas has to do everything the parts need.** Right now picking bits out of a bus (`a[7:0]`) or joining buses (`{hi, lo}`) only works in the Code tab, and Add16 needs both. Fix gaps like this before the user starts, and fix new ones as they turn up.
+    - ✅ Done 2026-10-24: dropping a wire between pins of different widths asks which bits. A wide source gives a slice (`lo = Add8(a[7:0])`); a narrow source fills part of the pin (`sum[7:0] = lo.sum`, and once every bit is filled, `sum = {hi.sum, lo.sum}`). Deleting one wire of a joined bus leaves the others, and each piece of a join is labeled with the bits it fills (`→[15:8]`).
+    - ✅ Done 2026-10-24: chips whose ports are all 1 bit work on buses (see "Chips on buses" in round 4). The copies come from the first bus wired in, a 1-bit input feeds every copy, the box reads `Xor ×16`, and inside it every signal (and every wire on the canvas) is 16 bits wide. Wiring a bus into a fresh one makes it that wide without asking which bit.
+  - **The parts, in build order.** For each, Claude writes the tests and the user builds it:
+    1. `Add16`: two `Add8`s. ✅ Built by the user on 2026-10-24; all 8 tests pass.
+    2. `Register16`: holds 16 bits, loads on a tick when `load` is 1, and clears on a tick when `reset` is 1. ✅ Built by the user on 2026-10-24 from two `Register8`s, loading zeros on reset through an `And ×16`; all 7 tests pass.
+    3. `Shift16`: shifts left or right by 0 to 15 places.
+    4. `Compare16`: equal, less than (signed) and less than (unsigned), as Forth flags.
+    5. `ALU16`: all 16 operations, with `op` picking the result.
+    6. `Inc13`: the program counter's +1.
+    7. `StackPointer`: a 5-bit pointer that moves by 0, +1, −1 or −2.
+    8. `Decode`: splits an instruction into its fields (kind, op, flags, stack moves, address).
+    9. `Crumb`: registers, both stacks, fetch and execute, and the memory bus.
+    10. `Console`: address decoding, RAM, screen, I/O ports, the frame counter and the random-number LFSR.
+  - **Also Claude:** the `--gates` checker, and the speed measurement at the end.
 - **3c, the console.** Screen panel, gamepad, LEDs and switches, number display, text console, frame counter and random port in the app, plus the cartridge menu.
 - **3d, debugger and turbo.** Step one instruction, breakpoints, a register, stack and memory view, and a turbo mode fast enough for games.
 - **3e, games.** Pong, then Tetris, then Space Invaders.

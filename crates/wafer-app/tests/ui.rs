@@ -593,3 +593,182 @@ fn shows_a_roms_program() {
     wait_for_reload(&mut h);
     let _ = h.get_by_label("squares.asm: 19 of 32 words (read-only)");
 }
+
+#[test]
+fn wires_slices_and_joins_of_buses() {
+    let dir = example_project("bits");
+    let halves = "chip Halves {\n  in  a[16]\n  out sum[16]\n\n  lo = Add8()\n  hi = Add8()\n}\n";
+    std::fs::write(dir.join("Halves.chip"), halves).unwrap();
+    let mut h = open(&dir);
+    h.state_mut().state.open_chip("Halves");
+    h.run_steps(3);
+
+    // 16-bit `a` into an 8-bit pin: pick which 8 bits.
+    let (from, to) = (pin(&mut h, "in:a", true, 0), pin(&mut h, "lo", false, 0));
+    drag(&mut h, from, to);
+    assert!(h.state().state.canvas.bit_picker_open());
+    shot(&mut h, "bit_picker");
+    h.get_by_label("a[7:0]").click();
+    h.run_steps(3);
+    assert!(chip_text(&dir, "Halves.chip").contains("lo = Add8(a[7:0])"));
+    let (from, to) = (pin(&mut h, "in:a", true, 0), pin(&mut h, "hi", false, 0));
+    drag(&mut h, from, to);
+    h.get_by_label("a[15:8]").click();
+    h.run_steps(3);
+    assert!(chip_text(&dir, "Halves.chip").contains("hi = Add8(a[15:8])"));
+
+    // An 8-bit sum into the 16-bit output: pick which bits it fills.
+    let (from, to) = (pin(&mut h, "lo", true, 0), pin(&mut h, "out:sum", false, 0));
+    drag(&mut h, from, to);
+    h.get_by_label("sum[7:0]").click();
+    h.run_steps(3);
+    assert!(chip_text(&dir, "Halves.chip").contains("sum[7:0] = lo.sum"));
+    let (from, to) = (pin(&mut h, "hi", true, 0), pin(&mut h, "out:sum", false, 0));
+    drag(&mut h, from, to);
+    h.get_by_label("sum[15:8]").click();
+    h.run_steps(3);
+    let text = chip_text(&dir, "Halves.chip");
+    assert!(text.contains("sum = {hi.sum, lo.sum}") && !text.contains("sum[7:0]"), "{text}");
+    shot(&mut h, "joined_bus");
+
+    // Escape cancels the picker without changing anything.
+    let (from, to) = (pin(&mut h, "in:a", true, 0), pin(&mut h, "lo", false, 1));
+    drag(&mut h, from, to);
+    assert!(h.state().state.canvas.bit_picker_open());
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    assert!(!h.state().state.canvas.bit_picker_open());
+    assert_eq!(chip_text(&dir, "Halves.chip"), text);
+
+    // A fresh built-in gate takes the whole bus, no questions asked. (Our
+    // own Not here is a 1-bit chip, so it would ask which bit.)
+    let c = h.state().state.canvas.rect().center();
+    add(&mut h, c + vec2(0.0, 160.0), "Nand");
+    let nand = keys(&h).into_iter().find(|k| k.starts_with("nand")).expect("a Nand was added");
+    let (from, to) = (pin(&mut h, "in:a", true, 0), pin(&mut h, &nand, false, 0));
+    drag(&mut h, from, to);
+    assert!(!h.state().state.canvas.bit_picker_open());
+    assert!(chip_text(&dir, "Halves.chip").contains(&format!("{nand} = Nand(a)")));
+}
+
+#[test]
+fn spreads_our_1_bit_xor_across_a_bus() {
+    let dir = example_project("spread");
+    std::fs::write(dir.join("Wide.chip"), "chip Wide {\n  in  a[16], b[16]\n  out y[16]\n}\n").unwrap();
+    let mut h = open(&dir);
+    h.state_mut().state.open_chip("Wide");
+    h.run_steps(3);
+
+    // Our Xor is a 1-bit chip, but a fresh one takes whatever bus it's given.
+    let c = h.state().state.canvas.rect().center();
+    add(&mut h, c, "Xor");
+    let xor = keys(&h).into_iter().find(|k| k.starts_with("xor")).expect("an Xor was added");
+    for (port, pin_index) in [("a", 0), ("b", 1)] {
+        let (from, to) = (pin(&mut h, &format!("in:{port}"), true, 0), pin(&mut h, &xor, false, pin_index));
+        drag(&mut h, from, to);
+        assert!(!h.state().state.canvas.bit_picker_open(), "no picker for {port}");
+    }
+    let (from, to) = (pin(&mut h, &xor, true, 0), pin(&mut h, "out:y", false, 0));
+    drag(&mut h, from, to);
+    let text = chip_text(&dir, "Wide.chip");
+    assert!(text.contains(&format!("{xor} = Xor(a, b)")) && text.contains(&format!("y = {xor}")), "{text}");
+    let errors: Vec<&str> =
+        h.state().state.ws.problems.iter().filter(|p| p.error).map(|p| p.message.as_str()).collect();
+    assert!(errors.is_empty(), "{errors:?}");
+
+    let st = &mut h.state_mut().state;
+    st.sim.set_input("a", bits_from_u64(0xF0F0, 16));
+    st.sim.set_input("b", bits_from_u64(0xFF00, 16));
+    h.run_steps(30);
+    assert_eq!(h.state().state.sim.read("y"), Some(bits_from_u64(0x0FF0, 16)));
+    shot(&mut h, "xor_x16");
+
+    // Inside, it's our 4-Nand Xor with 16-bit wires.
+    let at = node_center(&mut h, &xor);
+    click(&mut h, at);
+    h.key_press(Key::Tab);
+    h.run_steps(3);
+    let st = &mut h.state_mut().state;
+    assert_eq!(st.canvas.chip, "Xor");
+    assert_eq!(st.canvas.copies(&st.ws), 16);
+    let s = st.canvas.schematic(&st.ws).cloned().unwrap();
+    assert!(s.wires.iter().all(|w| w.width == 16), "every wire inside is 16 bits");
+    shot(&mut h, "inside_xor_x16");
+}
+
+/// Builds Register16 on the canvas the way the guide in the chat says to,
+/// starting from two Register8s with only the first one half wired.
+#[test]
+fn builds_register16_from_two_register8s() {
+    let dir = example_project("register16");
+    let tests =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../chips/Register16.chip")).unwrap();
+    let tests = &tests[tests.find("test Register16").unwrap()..];
+    let start = "chip Register16 {\n  in  d[16], load, reset\n  out out[16]\n  Lo = Register8(d[7:0], load)\n  Hi = Register8()\n}\n\n";
+    std::fs::write(dir.join("Register16.chip"), format!("{start}{tests}")).unwrap();
+    let _ = std::fs::remove_file(dir.join("Register16.layout.json"));
+    let mut h = open(&dir);
+    h.state_mut().state.open_chip("Register16");
+    h.run_steps(3);
+
+    // Step 1: the parts. (Lo and Hi are already there.)
+    let c = h.state().state.canvas.rect().center();
+    add(&mut h, c + vec2(-150.0, 170.0), "Not");
+    add(&mut h, c + vec2(40.0, 200.0), "And");
+    add(&mut h, c + vec2(40.0, -200.0), "Or");
+    let (not, and, or) = ("not1", "and1", "or1");
+    for key in [not, and, or] {
+        assert!(keys(&h).contains(&key.to_string()), "{key} in {:?}", keys(&h));
+    }
+    // F frames everything, so every pin is on screen.
+    h.hover_at(c);
+    h.run_steps(1);
+    h.key_press(Key::F);
+    h.run_steps(3);
+
+    let wire = |h: &mut Harness<'static, WaferApp>, from: &str, to: &str, pin_index: usize| {
+        let (a, b) = (pin(h, from, true, 0), pin(h, to, false, pin_index));
+        drag(h, a, b);
+    };
+    // Step 2: zeros when reset is 1. The 1-bit Not feeds every copy of the And.
+    wire(&mut h, "in:reset", not, 0);
+    wire(&mut h, "in:d", and, 0);
+    wire(&mut h, not, and, 1);
+    assert!(!h.state().state.canvas.bit_picker_open(), "a 1-bit wire into And ×16 needs no picking");
+    // Step 3: load on load or reset.
+    wire(&mut h, "in:load", or, 0);
+    wire(&mut h, "in:reset", or, 1);
+    // Step 4: each half loads from its half of the And.
+    wire(&mut h, and, "Lo", 0);
+    h.get_by_label("and1[7:0]").click();
+    h.run_steps(3);
+    wire(&mut h, and, "Hi", 0);
+    h.get_by_label("and1[15:8]").click();
+    h.run_steps(3);
+    wire(&mut h, or, "Lo", 1);
+    wire(&mut h, or, "Hi", 1);
+    // Step 5: the two halves make the output.
+    let (a, b) = (pin(&mut h, "Lo", true, 0), pin(&mut h, "out:out", false, 0));
+    drag(&mut h, a, b);
+    h.get_by_label("out[7:0]").click();
+    h.run_steps(3);
+    let (a, b) = (pin(&mut h, "Hi", true, 0), pin(&mut h, "out:out", false, 0));
+    drag(&mut h, a, b);
+    h.get_by_label("out[15:8]").click();
+    h.run_steps(3);
+    shot(&mut h, "register16");
+
+    let text = chip_text(&dir, "Register16.chip");
+    for line in [
+        "Lo = Register8(and1[7:0], or1)",
+        "Hi = Register8(and1[15:8], or1)",
+        "not1 = Not(reset)",
+        "and1 = And(d, not1)",
+        "or1 = Or(load, reset)",
+        "out = {Hi, Lo}",
+    ] {
+        assert!(text.contains(line), "missing `{line}`:\n{text}");
+    }
+    let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "Register16");
+    assert!(results.passed(), "Register16's tests fail:\n{text}");
+}

@@ -92,7 +92,14 @@ pub enum Callee {
         width: usize,
         addr: usize,
     },
-    Chip(String),
+    /// Another chip. A chip whose ports are all 1 bit can be used on buses:
+    /// it's then repeated `copies` times side by side, once per bit, like a
+    /// built-in gate. `copies` is 1 for an ordinary use, and 0 while the
+    /// checker is still working it out.
+    Chip {
+        name: String,
+        copies: usize,
+    },
     Unknown,
 }
 
@@ -198,10 +205,10 @@ impl Design {
     pub fn signature(&self, callee: &Callee) -> Signature {
         match callee {
             Callee::Gate { kind, width, addr } => gate_signature(*kind, *width, *addr),
-            Callee::Chip(name) => {
+            Callee::Chip { name, copies } => {
                 let info = &self.chips[name];
                 let ports = |ports: &[Port]| ports.iter().map(|p| (p.name.clone(), p.width)).collect();
-                Signature { inputs: ports(&info.inputs), outputs: ports(&info.outputs) }
+                scaled(&Signature { inputs: ports(&info.inputs), outputs: ports(&info.outputs) }, *copies)
             }
             Callee::Unknown => Signature::default(),
         }
@@ -216,7 +223,7 @@ impl Design {
             let Some(info) = design.chips.get(chip) else { return false };
             !info.has_errors
                 && info.instances.iter().all(|inst| match &inst.callee {
-                    Callee::Chip(name) => walk(design, name, seen),
+                    Callee::Chip { name, .. } => walk(design, name, seen),
                     Callee::Gate { .. } => true,
                     Callee::Unknown => false,
                 })
@@ -235,7 +242,7 @@ impl Design {
                 .instances
                 .iter()
                 .map(|inst| match &inst.callee {
-                    Callee::Chip(name) => walk(design, name, guard - 1),
+                    Callee::Chip { name, .. } => walk(design, name, guard - 1),
                     _ => 0,
                 })
                 .max()
@@ -243,6 +250,21 @@ impl Design {
         }
         walk(self, chip, 64)
     }
+}
+
+/// True for a chip that can work on buses bit by bit: it has inputs, and
+/// every port is 1 bit.
+pub fn is_bitwise(sig: &Signature) -> bool {
+    !sig.inputs.is_empty() && sig.inputs.iter().chain(&sig.outputs).all(|(_, w)| *w == 1)
+}
+
+/// A bitwise chip's ports when it's repeated `copies` times.
+fn scaled(sig: &Signature, copies: usize) -> Signature {
+    if copies <= 1 {
+        return sig.clone();
+    }
+    let wide = |ports: &[(String, usize)]| ports.iter().map(|(n, w)| (n.clone(), w * copies)).collect();
+    Signature { inputs: wide(&sig.inputs), outputs: wide(&sig.outputs) }
 }
 
 fn gate_signature(kind: GateKind, width: usize, addr: usize) -> Signature {
@@ -478,7 +500,8 @@ impl BodyCheck<'_> {
     ) -> Instance {
         let chip = &call.chip.name;
         let (callee, ports): (Callee, Vec<String>) = if let Some(sig) = self.sigs.get(chip) {
-            (Callee::Chip(chip.clone()), sig.inputs.iter().map(|(n, _)| n.clone()).collect())
+            let copies = if is_bitwise(sig) { 0 } else { 1 };
+            (Callee::Chip { name: chip.clone(), copies }, sig.inputs.iter().map(|(n, _)| n.clone()).collect())
         } else if let Some(kind) = GateKind::from_name(chip) {
             let width = kind.fixed_width().unwrap_or(0);
             (Callee::Gate { kind, width, addr: 0 }, kind.inputs().iter().map(|n| n.to_string()).collect())
@@ -597,7 +620,9 @@ impl BodyCheck<'_> {
     fn instance_outputs(&self, index: usize) -> Vec<(String, Option<usize>)> {
         match &self.info.instances[index].callee {
             Callee::Gate { width, .. } => vec![("out".into(), (*width > 0).then_some(*width))],
-            Callee::Chip(chip) => self.sigs[chip].outputs.iter().map(|(n, w)| (n.clone(), Some(*w))).collect(),
+            Callee::Chip { name, copies } => {
+                self.sigs[name].outputs.iter().map(|(n, w)| (n.clone(), (*copies > 0).then_some(w * copies))).collect()
+            }
             Callee::Unknown => Vec::new(),
         }
     }
@@ -641,6 +666,14 @@ impl BodyCheck<'_> {
         loop {
             let mut changed = false;
             for i in 0..self.info.instances.len() {
+                if let Callee::Chip { copies: 0, .. } = self.info.instances[i].callee
+                    && let Some(copies) = self.copies_from_inputs(i)
+                {
+                    if let Callee::Chip { copies: c, .. } = &mut self.info.instances[i].callee {
+                        *c = copies;
+                    }
+                    changed = true;
+                }
                 let Callee::Gate { kind, width, addr } = self.info.instances[i].callee else { continue };
                 // The part's width comes from its bus inputs; one-bit
                 // inputs like `sel` don't count.
@@ -675,6 +708,15 @@ impl BodyCheck<'_> {
         }
 
         for i in 0..self.info.instances.len() {
+            // A bitwise chip given only numbers (or nothing): one copy per
+            // bit of the widest number.
+            if let Callee::Chip { copies: 0, .. } = self.info.instances[i].callee {
+                let widest =
+                    self.info.instances[i].inputs.iter().flatten().filter_map(|e| self.quiet_width(e, true)).max();
+                if let Callee::Chip { copies, .. } = &mut self.info.instances[i].callee {
+                    *copies = widest.unwrap_or(1).max(1);
+                }
+            }
             let Callee::Gate { kind, width, addr } = self.info.instances[i].callee else { continue };
             // Ports given only numbers: use the widest number's width.
             let guess = |want: PortWidth| {
@@ -724,6 +766,17 @@ impl BodyCheck<'_> {
             }
             self.info.wires[w].width = self.wire_widths[w].unwrap_or(1);
         }
+    }
+
+    /// How many copies a bitwise chip needs, from what's wired to it: the
+    /// first input wider than 1 bit decides. `None` while an input's width
+    /// is unknown.
+    fn copies_from_inputs(&self, index: usize) -> Option<usize> {
+        let mut widths = Vec::new();
+        for expr in self.info.instances[index].inputs.iter().flatten() {
+            widths.push(self.quiet_width(expr, false)?);
+        }
+        widths.into_iter().find(|&w| w > 1).or(Some(1))
     }
 
     /// Checks an expression, reporting mistakes, and returns its width.
@@ -834,7 +887,7 @@ impl BodyCheck<'_> {
     fn callee_name(&self, index: usize) -> String {
         match &self.info.instances[index].callee {
             Callee::Gate { kind, .. } => kind.name().into(),
-            Callee::Chip(name) => name.clone(),
+            Callee::Chip { name, .. } => name.clone(),
             Callee::Unknown => "?".into(),
         }
     }
@@ -862,7 +915,7 @@ impl BodyCheck<'_> {
             let instance = self.info.instances[i].clone();
             let sig = match &instance.callee {
                 Callee::Gate { kind, width, addr } => gate_signature(*kind, *width, *addr),
-                Callee::Chip(chip) => self.sigs[chip].clone(),
+                Callee::Chip { name, copies } => scaled(&self.sigs[name], *copies),
                 Callee::Unknown => {
                     // Already reported; count its output as driven so the
                     // typo doesn't also show up as "never driven".
@@ -874,10 +927,13 @@ impl BodyCheck<'_> {
                 }
             };
             let callee = self.callee_name(i);
+            // A 1-bit signal feeds every copy of a chip used on buses.
+            let copied = matches!(instance.callee, Callee::Chip { copies: 2.., .. });
             for ((port, expected), expr) in sig.inputs.iter().zip(&instance.inputs) {
                 let Some(expr) = expr else { continue };
                 if let Some(width) = self.check_expr(expr, Some(*expected))
                     && width != *expected
+                    && !(copied && width == 1)
                 {
                     self.error(Diagnostic::error(
                         expr.span,
@@ -1070,7 +1126,7 @@ fn find_recursion(chips: &mut BTreeMap<String, ChipInfo>, diags: &mut Vec<Diagno
         }
         stack.push(chip.to_string());
         for inst in &chips[chip].instances {
-            let Callee::Chip(callee) = &inst.callee else { continue };
+            let Callee::Chip { name: callee, .. } = &inst.callee else { continue };
             if let Some(start) = stack.iter().position(|c| c == callee) {
                 let mut path = stack[start..].to_vec();
                 path.push(callee.clone());
@@ -1184,8 +1240,8 @@ fn check_test(def: &ast::TestDef, chips: &BTreeMap<String, ChipInfo>, diags: &mu
             Name::Wire(i) => Some(chip.wires[*i].width),
             Name::Instance(k) => match &chip.instances[*k].callee {
                 Callee::Gate { width, .. } => Some(*width),
-                Callee::Chip(c) => match chips.get(c)?.outputs.as_slice() {
-                    [only] => Some(only.width),
+                Callee::Chip { name, copies } => match chips.get(name)?.outputs.as_slice() {
+                    [only] => Some(only.width * copies.max(&1)),
                     _ => None,
                 },
                 Callee::Unknown => None,

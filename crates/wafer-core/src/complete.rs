@@ -181,7 +181,7 @@ fn ports(list: &[(String, usize)]) -> String {
 /// `FullAdder(a, b, cin) → sum, cout`
 pub fn signature(design: &Design, callee: &str) -> Option<String> {
     if let Some(info) = design.chips.get(callee) {
-        let sig = design.signature(&Callee::Chip(info.name.clone()));
+        let sig = design.signature(&Callee::Chip { name: info.name.clone(), copies: 1 });
         return Some(format!("{callee}({}) → {}", ports(&sig.inputs), ports(&sig.outputs)));
     }
     let gate = GateKind::from_name(callee)?;
@@ -202,7 +202,7 @@ fn callees(design: &Design, current: &str) -> Vec<Suggestion> {
         }
     }
     for name in design.chips.keys().filter(|c| c.as_str() != current) {
-        let sig = design.signature(&Callee::Chip(name.clone()));
+        let sig = design.signature(&Callee::Chip { name: name.clone(), copies: 1 });
         let detail = format!("chip · {} → {}", ports(&sig.inputs), ports(&sig.outputs));
         out.push(Suggestion { label: name.clone(), insert: format!("{name}()"), detail, cursor_back: 1 });
     }
@@ -240,12 +240,13 @@ fn signals(design: &Design, info: &ChipInfo) -> Vec<Suggestion> {
                 Name::Wire(i) => port_detail("wire", info.wires[i].width),
                 Name::Instance(k) => match &info.instances[k].callee {
                     Callee::Gate { kind, .. } => format!("{} gate", kind.name()),
-                    Callee::Chip(chip) => {
+                    Callee::Chip { name: chip, copies } => {
                         let outs = design.signature(&info.instances[k].callee).outputs;
+                        let times = if *copies > 1 { format!(" ×{copies}") } else { String::new() };
                         if outs.len() > 1 {
-                            format!("{chip} chip · use .{}", outs[0].0)
+                            format!("{chip} chip{times} · use .{}", outs[0].0)
                         } else {
-                            format!("{chip} chip")
+                            format!("{chip} chip{times}")
                         }
                     }
                     Callee::Unknown => "box".into(),

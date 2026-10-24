@@ -6,6 +6,7 @@ use crate::ast::{self, Expr, ExprKind, StmtValue};
 use crate::check::{ChipInfo, Design, Name};
 use crate::diag::FileId;
 use crate::lexer::{Tok, lex};
+use crate::logic::{Logic, bits_from_u64};
 use crate::project::Project;
 
 /// The input end of a wire.
@@ -41,6 +42,21 @@ pub enum Edit {
     },
     Disconnect {
         sink: Sink,
+    },
+    /// Wires `source` (like `lo.sum` or `a[7:0]`) to bits `hi..lo` of a pin,
+    /// leaving its other bits as they were. Filling every bit of an output
+    /// piece by piece ends up as one line, like `sum = {hi.sum, lo.sum}`.
+    ConnectBits {
+        sink: Sink,
+        hi: usize,
+        lo: usize,
+        source: String,
+    },
+    /// Disconnects just the bits of a pin that `source` (`a`, `lo.sum`)
+    /// drives, leaving the rest.
+    DisconnectSource {
+        sink: Sink,
+        source: String,
     },
     AddPort {
         dir: PortDir,
@@ -86,6 +102,8 @@ pub fn apply(project: &Project, design: &Design, chip: &str, edit: &Edit) -> Res
         Edit::RemoveInstance { name } => editor.remove_instance(name)?,
         Edit::Connect { sink, source } => editor.connect(sink, Some(source))?,
         Edit::Disconnect { sink } => editor.connect(sink, None)?,
+        Edit::ConnectBits { sink, hi, lo, source } => editor.connect_bits(sink, *hi, *lo, source)?,
+        Edit::DisconnectSource { sink, source } => editor.disconnect_source(sink, source)?,
         Edit::AddPort { dir, name, width } => editor.add_port(*dir, name, *width)?,
         Edit::RemovePort { dir, name } => editor.remove_port(*dir, name)?,
         Edit::Rename { old, new } => editor.rename(old, new)?,
@@ -497,6 +515,211 @@ impl<'a> Editor<'a> {
         Ok(())
     }
 
+    fn connect_bits(&mut self, sink: &Sink, hi: usize, lo: usize, source: &str) -> Result<(), String> {
+        let new =
+            self.source_bits(source).ok_or_else(|| format!("`{source}` isn't a signal in `{}`", self.info.name))?;
+        if hi < lo || new.len() != hi - lo + 1 {
+            return Err(format!("`{source}` is {} bits, but bits {hi}..{lo} are {}", new.len(), hi.max(lo) - lo + 1));
+        }
+        self.change_bits(sink, |bits| {
+            let slot = bits.get_mut(lo..=hi).ok_or("those bits are past the end of the pin")?;
+            slot.clone_from_slice(&new);
+            Ok(())
+        })
+    }
+
+    fn disconnect_source(&mut self, sink: &Sink, source: &str) -> Result<(), String> {
+        let base = source.split('[').next().unwrap_or(source).to_string();
+        let mut found = false;
+        self.change_bits(sink, |bits| {
+            for bit in bits.iter_mut() {
+                if matches!(bit, Bit::Sig { base: b, .. } if *b == base) {
+                    *bit = Bit::Open;
+                    found = true;
+                }
+            }
+            Ok(())
+        })?;
+        if !found {
+            // Not something we can pick apart: disconnect the whole pin.
+            self.changes.clear();
+            self.appended.clear();
+            self.connect(sink, None)?;
+        }
+        Ok(())
+    }
+
+    /// Works out what drives each bit of a pin, lets `change` rewrite that,
+    /// and writes the result back as text.
+    fn change_bits(
+        &mut self,
+        sink: &Sink,
+        change: impl FnOnce(&mut Vec<Bit>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        match sink {
+            Sink::Instance { name, port } => {
+                let (ports, mut args) = self.call_args(name)?;
+                let slot =
+                    ports.iter().position(|p| p == port).ok_or_else(|| format!("`{name}` has no input `{port}`"))?;
+                let inst = self.info.instances.iter().find(|i| i.name == *name).expect("call_args found it");
+                let width = self.design.signature(&inst.callee).inputs[slot].1;
+                let mut bits = inst.inputs[slot]
+                    .as_ref()
+                    .and_then(|e| self.expr_bits(e, Some(width)))
+                    .filter(|b| b.len() == width)
+                    .unwrap_or_else(|| vec![Bit::Open; width]);
+                change(&mut bits)?;
+                // A box input can't have holes: the rest reads 0 until it's wired.
+                args[slot] = (!bits.iter().all(|b| *b == Bit::Open)).then(|| render_bits(&bits));
+                self.rewrite_call(name, &ports, &args);
+            }
+            Sink::Output(port) => {
+                let Some(Name::Output(index)) = self.info.names.get(port).copied() else {
+                    return Err(format!("`{}` has no output `{port}`", self.info.name));
+                };
+                let width = self.info.outputs[index].width;
+                let mut bits = vec![Bit::Open; width];
+                if self.info.instances.iter().any(|i| i.drives == Some(Name::Output(index)) && !i.shared) {
+                    self.release_output(port)?;
+                    if let Some((_, fresh)) = self.renamed.last() {
+                        bits = (0..width).map(|bit| Bit::Sig { base: fresh.clone(), width, bit }).collect();
+                    }
+                }
+                let def: &'a ast::ChipDef = self.def;
+                let mut old = Vec::new();
+                for stmt in &def.stmts {
+                    let StmtValue::Expr(value) = &stmt.value else { continue };
+                    if stmt.target.name != *port {
+                        continue;
+                    }
+                    let (hi, lo) = stmt.select.map_or((width - 1, 0), |s| (s.hi, s.lo));
+                    if let Some(v) = self.expr_bits(value, Some(hi - lo + 1)).filter(|v| v.len() == hi - lo + 1)
+                        && let Some(slot) = bits.get_mut(lo..=hi)
+                    {
+                        slot.clone_from_slice(&v);
+                    }
+                    old.push(stmt);
+                }
+                change(&mut bits)?;
+
+                // One line per stretch of driven bits.
+                let mut lines = Vec::new();
+                let mut i = 0;
+                while i < width {
+                    if bits[i] == Bit::Open {
+                        i += 1;
+                        continue;
+                    }
+                    let mut j = i;
+                    while j + 1 < width && bits[j + 1] != Bit::Open {
+                        j += 1;
+                    }
+                    let value = render_bits(&bits[i..=j]);
+                    lines.push(match (i, j) {
+                        (0, j) if j == width - 1 => format!("{port} = {value}"),
+                        (i, j) if i == j => format!("{port}[{i}] = {value}"),
+                        (i, j) => format!("{port}[{j}:{i}] = {value}"),
+                    });
+                    i = j + 1;
+                }
+                // The new lines go where the first old one was.
+                match old.split_first() {
+                    Some((first, rest)) => {
+                        if lines.is_empty() {
+                            self.remove_stmt(first);
+                        } else {
+                            let start = self.line_start(first.span.start);
+                            let indent = self.text[start..first.span.start].to_string();
+                            let indent = if indent.trim().is_empty() { indent } else { self.indent() };
+                            self.changes.push((first.span.start, first.span.end, lines.join(&format!("\n{indent}"))));
+                        }
+                        for stmt in rest {
+                            self.remove_stmt(stmt);
+                        }
+                    }
+                    None => self.appended.extend(lines),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// How wide `base` (or `base.port`) is.
+    fn signal_width(&self, base: &str, port: Option<&str>) -> Option<usize> {
+        match (*self.info.names.get(base)?, port) {
+            (Name::Input(i), None) => Some(self.info.inputs[i].width),
+            (Name::Output(i), None) => Some(self.info.outputs[i].width),
+            (Name::Wire(i), None) => Some(self.info.wires[i].width),
+            (Name::Instance(k), port) => {
+                let sig = self.design.signature(&self.info.instances[k].callee);
+                match port {
+                    Some(p) => sig.outputs.iter().find(|(n, _)| n == p).map(|(_, w)| *w),
+                    None => match sig.outputs.as_slice() {
+                        [(_, w)] => Some(*w),
+                        _ => None,
+                    },
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn ref_bits(&self, base: &str, port: Option<&str>, select: Option<(usize, usize)>) -> Option<Vec<Bit>> {
+        let width = self.signal_width(base, port)?;
+        let (hi, lo) = select.unwrap_or((width.checked_sub(1)?, 0));
+        if hi >= width || lo > hi {
+            return None;
+        }
+        let name = port.map_or_else(|| base.to_string(), |p| format!("{base}.{p}"));
+        Some((lo..=hi).map(|bit| Bit::Sig { base: name.clone(), width, bit }).collect())
+    }
+
+    /// What an expression drives, lowest bit first. A bare number takes
+    /// `width` when given, since `1` on a 16-bit pin means all 16 bits.
+    fn expr_bits(&self, expr: &Expr, width: Option<usize>) -> Option<Vec<Bit>> {
+        match &expr.kind {
+            ExprKind::Literal(lit) => {
+                let width = width.unwrap_or(lit.natural_width());
+                Some(bits_from_u64(lit.value, width).into_iter().map(|b| Bit::Const(b == Logic::One)).collect())
+            }
+            ExprKind::Ref { base, port, select } => {
+                self.ref_bits(&base.name, port.as_ref().map(|p| p.name.as_str()), select.map(|s| (s.hi, s.lo)))
+            }
+            ExprKind::Concat(parts) => {
+                let mut bits = Vec::new();
+                for part in parts.iter().rev() {
+                    bits.extend(self.expr_bits(part, None)?);
+                }
+                Some(bits)
+            }
+            ExprKind::Str(_) => None,
+        }
+    }
+
+    /// The bits of a source as the canvas writes it: `a`, `lo.sum`,
+    /// `a[7:0]` or `n1[3]`.
+    fn source_bits(&self, text: &str) -> Option<Vec<Bit>> {
+        let (name, select) = match text.split_once('[') {
+            Some((name, rest)) => {
+                let inner = rest.strip_suffix(']')?;
+                let select = match inner.split_once(':') {
+                    Some((hi, lo)) => (hi.trim().parse().ok()?, lo.trim().parse().ok()?),
+                    None => {
+                        let bit = inner.trim().parse().ok()?;
+                        (bit, bit)
+                    }
+                };
+                (name, Some(select))
+            }
+            None => (text, None),
+        };
+        let (base, port) = match name.split_once('.') {
+            Some((base, port)) => (base, Some(port)),
+            None => (name, None),
+        };
+        self.ref_bits(base, port, select)
+    }
+
     /// Disconnects every pin that reads `name`, and removes connection
     /// lines that read it.
     fn disconnect_readers(&mut self, name: &str, skip: Option<&str>) -> Result<(), String> {
@@ -692,6 +915,61 @@ impl<'a> Editor<'a> {
     }
 }
 
+/// What drives one bit of a pin.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Bit {
+    /// Nothing.
+    Open,
+    Const(bool),
+    /// Bit `bit` of `base` (`a`, `lo.sum`), a signal `width` bits wide.
+    Sig {
+        base: String,
+        width: usize,
+        bit: usize,
+    },
+}
+
+/// Writes bits (lowest first) the way a person would: `a`, `a[7:0]`,
+/// `0x00` or `{hi.sum, lo.sum}`. Open bits are written as 0.
+fn render_bits(bits: &[Bit]) -> String {
+    let mut parts = Vec::new();
+    let mut i = bits.len();
+    while i > 0 {
+        // A run of bits j..i that reads as one piece.
+        let mut j = i - 1;
+        match &bits[i - 1] {
+            Bit::Sig { base, width, bit } => {
+                while j > 0
+                    && *bit >= i - j
+                    && matches!(&bits[j - 1], Bit::Sig { base: b, bit: k, .. } if b == base && *k == bit - (i - j))
+                {
+                    j -= 1;
+                }
+                let (hi, lo) = (*bit, bit - (i - 1 - j));
+                parts.push(match (hi, lo) {
+                    (hi, 0) if hi == width - 1 => base.clone(),
+                    (hi, lo) if hi == lo => format!("{base}[{hi}]"),
+                    (hi, lo) => format!("{base}[{hi}:{lo}]"),
+                });
+            }
+            Bit::Const(_) | Bit::Open => {
+                while j > 0 && matches!(bits[j - 1], Bit::Const(_) | Bit::Open) && i - j < 64 {
+                    j -= 1;
+                }
+                let n = i - j;
+                let value = (j..i).fold(0u64, |v, p| v | u64::from(bits[p] == Bit::Const(true)) << (p - j));
+                parts.push(if n.is_multiple_of(4) {
+                    format!("0x{value:0w$X}", w = n / 4)
+                } else {
+                    format!("0b{value:0n$b}")
+                });
+            }
+        }
+        i = j;
+    }
+    if parts.len() == 1 { parts.remove(0) } else { format!("{{{}}}", parts.join(", ")) }
+}
+
 /// True if the expression reads `name`.
 fn mentions(expr: &Expr, name: &str) -> bool {
     match &expr.kind {
@@ -866,5 +1144,73 @@ mod tests {
         let edit = Edit::Connect { sink: Sink::Instance { name: "y".into(), port: "addr".into() }, source: "a".into() };
         let out = run(text, edit).unwrap();
         assert!(out.contains("y = Rom(a, file: \"p.hex\")"), "{out}");
+    }
+
+    const HALVES: &str = "chip H {\n  in  a[16]\n  out sum[16]\n\n  lo = Not(a[7:0])\n  hi = Not(a[15:8])\n}\n";
+
+    fn bits(sink: Sink, hi: usize, lo: usize, source: &str) -> Edit {
+        Edit::ConnectBits { sink, hi, lo, source: source.into() }
+    }
+
+    #[test]
+    fn joins_an_output_from_pieces() {
+        let sum = || Sink::Output("sum".into());
+        let text = run(HALVES, bits(sum(), 7, 0, "lo")).unwrap();
+        assert!(text.contains("  sum[7:0] = lo\n"), "{text}");
+        let text = run(&text, bits(sum(), 15, 8, "hi")).unwrap();
+        assert!(text.contains("  sum = {hi, lo}\n"), "the pieces become one line:\n{text}");
+        assert!(!text.contains("sum[7:0]"), "{text}");
+        clean(&text);
+        // Deleting one wire of the join leaves the other.
+        let edit = Edit::DisconnectSource { sink: sum(), source: "lo".into() };
+        let text = run(&text, edit).unwrap();
+        assert!(text.contains("  sum[15:8] = hi\n") && !text.contains("lo\n}"), "{text}");
+        // A single bit.
+        let text = run(&text, bits(sum(), 0, 0, "a[3]")).unwrap();
+        assert!(text.contains("sum[0] = a[3]"), "{text}");
+    }
+
+    #[test]
+    fn fills_part_of_a_box_input() {
+        let text = "chip H {\n  in  a[16], b[8]\n  out y[16]\n\n  y = Xor(a, a)\n}\n";
+        let pin = || Sink::Instance { name: "y".into(), port: "b".into() };
+        let text = run(text, Edit::Disconnect { sink: pin() }).unwrap();
+        // The rest of the pin reads 0 until something's wired to it.
+        let text = run(&text, bits(pin(), 7, 0, "b")).unwrap();
+        assert!(text.contains("y = Xor(a, {0x00, b})"), "{text}");
+        let text = run(&text, bits(pin(), 15, 8, "a[7:0]")).unwrap();
+        assert!(text.contains("y = Xor(a, {a[7:0], b})"), "{text}");
+        // Pieces of one signal in order merge back into its name.
+        let text = run(&text, bits(pin(), 7, 0, "a[7:0]")).unwrap();
+        let text = run(&text, bits(pin(), 15, 8, "a[15:8]")).unwrap();
+        assert!(text.contains("y = Xor(a, a)"), "{text}");
+        let text = run(&text, Edit::DisconnectSource { sink: pin(), source: "a".into() }).unwrap();
+        assert!(text.contains("y = Xor(a)"), "nothing left, so nothing connected:\n{text}");
+    }
+
+    #[test]
+    fn joining_into_a_box_driven_output_frees_the_box() {
+        let text = "chip H {\n  in  a[16], b[8]\n  out sum[16]\n\n  sum = Not(a)\n}\n";
+        let text = run(text, bits(Sink::Output("sum".into()), 7, 0, "b")).unwrap();
+        assert!(text.contains("not1 = Not(a)"), "{text}");
+        assert!(text.contains("sum = {not1[15:8], b}"), "{text}");
+        clean(&text);
+    }
+
+    #[test]
+    fn bit_edits_check_widths() {
+        let sum = Sink::Output("sum".into());
+        assert_eq!(run(HALVES, bits(sum.clone(), 7, 0, "a")).unwrap_err(), "`a` is 16 bits, but bits 7..0 are 8");
+        assert!(run(HALVES, bits(sum, 7, 0, "nope")).unwrap_err().contains("isn't a signal"));
+    }
+
+    #[test]
+    fn renders_bits_like_a_person_would() {
+        let sig = |bit| Bit::Sig { base: "a".into(), width: 8, bit };
+        assert_eq!(render_bits(&(0..8).map(sig).collect::<Vec<_>>()), "a");
+        assert_eq!(render_bits(&(2..6).map(sig).collect::<Vec<_>>()), "a[5:2]");
+        assert_eq!(render_bits(&[sig(3)]), "a[3]");
+        let mixed = [Bit::Const(true), Bit::Const(false), sig(7), Bit::Open, Bit::Open, Bit::Open, Bit::Open];
+        assert_eq!(render_bits(&mixed), "{0x0, a[7], 0b01}");
     }
 }

@@ -28,7 +28,7 @@ anything else changes them, so you can edit text and boxes side by side.
 | Key | Does |
 |---|---|
 | Shift+A | Add a gate, chip, input or output (type to search) |
-| Drag from a pin | Draw a wire to another pin |
+| Drag from a pin | Draw a wire to another pin. Between pins of different widths it asks which bits, like `a[7:0]` |
 | Click an input | Flip it between 0 and 1 |
 | Drag / G | Move the selection (G: it follows the pointer; click to drop) |
 | Shift+D | Duplicate |
@@ -120,6 +120,11 @@ changes) or a `.hex` file of words.
 If you write a chip with the same name as a built-in (like `chips/Xor.chip`),
 yours replaces it across the project, and `wafer test` checks that the two
 agree.
+
+A chip whose inputs and outputs are all 1 bit works on buses too, like a
+built-in gate: with 16-bit `a` and `b`, `Xor(a, b)` is 16 of your Xors side
+by side (a box labelled `Xor ×16`), and a 1-bit input feeds every copy.
+Look inside it and every wire is 16 bits wide.
 
 Several drivers can share a bus with `bus <- TriBuf(x, en)` lines. Tests can
 be truth tables or steps:
