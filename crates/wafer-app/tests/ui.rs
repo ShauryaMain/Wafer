@@ -56,7 +56,10 @@ fn shot(harness: &mut Harness<'static, WaferApp>, name: &str) {
 fn shows_the_example_project() {
     let dir = example_project("overview");
     let mut h = open(&dir);
-    assert_eq!(h.state().state.canvas.chip, "Counter8", "opens the most built-up chip");
+    // The most built-up chip: the one with the most levels of chips inside.
+    let st = &h.state().state;
+    let deepest = st.ws.chip_names().iter().map(|c| st.ws.design.depth(c)).max().unwrap();
+    assert_eq!(st.ws.design.depth(&st.canvas.chip), deepest, "opens {} first", st.canvas.chip);
     h.state_mut().state.open_chip("HalfAdder");
     h.run_steps(4);
     shot(&mut h, "overview");
@@ -849,4 +852,125 @@ fn builds_shift16_with_option_drags() {
     }
     let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "Shift16");
     assert!(results.passed(), "Shift16's tests fail:\n{text}");
+}
+
+fn right_click(h: &mut Harness<'static, WaferApp>, pos: Pos2) {
+    h.hover_at(pos);
+    h.run_steps(1);
+    for pressed in [true, false] {
+        h.event(Event::PointerButton { pos, button: PointerButton::Secondary, pressed, modifiers: Modifiers::NONE });
+        h.run_steps(1);
+    }
+    h.run_steps(2);
+}
+
+/// Builds Compare16 on the canvas the way the guide in the chat says to.
+#[test]
+fn builds_compare16_with_constants_and_bit_picks() {
+    let dir = example_project("compare16");
+    let real =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../chips/Compare16.chip")).unwrap();
+    let tests = &real[real.find("test Compare16").unwrap()..];
+    let start = "chip Compare16 {\n  in  a[16], b[16]\n  out eq, lt, ult\n}\n\n";
+    std::fs::write(dir.join("Compare16.chip"), format!("{start}{tests}")).unwrap();
+    let _ = std::fs::remove_file(dir.join("Compare16.layout.json"));
+    let mut h = open(&dir);
+    h.state_mut().state.open_chip("Compare16");
+    h.run_steps(3);
+
+    // Step 1: the parts, in three rows.
+    let c = h.state().state.canvas.rect().center();
+    // Spread out, so no pin sits on top of another.
+    let parts = [
+        ("Not", vec2(-300.0, -200.0)),
+        ("Add16", vec2(-50.0, -200.0)),
+        ("Not", vec2(200.0, -200.0)),
+        ("Or", vec2(-340.0, 0.0)),
+        ("Or", vec2(-170.0, 0.0)),
+        ("Or", vec2(0.0, 0.0)),
+        ("Or", vec2(170.0, 0.0)),
+        ("Not", vec2(340.0, 0.0)),
+        ("Xor", vec2(-50.0, 200.0)),
+        ("Mux", vec2(200.0, 200.0)),
+    ];
+    for (part, at) in parts {
+        add(&mut h, c + at, part);
+    }
+    rename(&mut h, "add16_1", "add16_1", "diff");
+    h.hover_at(c);
+    h.run_steps(1);
+    h.key_press(Key::F);
+    h.run_steps(3);
+
+    let wire = |h: &mut Harness<'static, WaferApp>, from: (&str, usize), to: (&str, usize), pick: Option<&str>| {
+        let (a, b) = (pin(h, from.0, true, from.1), pin(h, to.0, false, to.1));
+        drag(h, a, b);
+        if let Some(label) = pick {
+            h.get_by_label(label).click();
+            h.run_steps(3);
+        }
+    };
+    let option_wire = |h: &mut Harness<'static, WaferApp>, from: (&str, usize), to: (&str, usize), pick: &str| {
+        let (a, b) = (pin(h, from.0, true, from.1), pin(h, to.0, false, to.1));
+        h.event(Event::ModifiersChanged(Modifiers::ALT));
+        drag(h, a, b);
+        h.event(Event::ModifiersChanged(Modifiers::NONE));
+        h.run_steps(1);
+        h.get_by_label(pick).click();
+        h.run_steps(3);
+    };
+
+    // Step 2: a - b, as a + (not b) + 1.
+    wire(&mut h, ("in:b", 0), ("not1", 0), None);
+    wire(&mut h, ("in:a", 0), ("diff", 0), None);
+    wire(&mut h, ("not1", 0), ("diff", 1), None);
+    let cin = pin(&mut h, "diff", false, 2);
+    right_click(&mut h, cin);
+    shot(&mut h, "pin_menu");
+    h.get_by_label("Set to 1").click();
+    h.run_steps(3);
+    // Step 3: no carry means a < b.
+    wire(&mut h, ("diff", 1), ("not2", 0), None);
+    wire(&mut h, ("not2", 0), ("out:ult", 0), None);
+    // Step 4: equal when every bit of the difference is 0.
+    option_wire(&mut h, ("diff", 0), ("or1", 0), "diff.sum[15:8]");
+    shot(&mut h, "half_picker");
+    option_wire(&mut h, ("diff", 0), ("or1", 1), "diff.sum[7:0]");
+    option_wire(&mut h, ("or1", 0), ("or2", 0), "or1[7:4]");
+    option_wire(&mut h, ("or1", 0), ("or2", 1), "or1[3:0]");
+    option_wire(&mut h, ("or2", 0), ("or3", 0), "or2[3:2]");
+    option_wire(&mut h, ("or2", 0), ("or3", 1), "or2[1:0]");
+    option_wire(&mut h, ("or3", 0), ("or4", 0), "or3[1]");
+    option_wire(&mut h, ("or3", 0), ("or4", 1), "or3[0]");
+    wire(&mut h, ("or4", 0), ("not3", 0), None);
+    wire(&mut h, ("not3", 0), ("out:eq", 0), None);
+    // Step 5: signed: when the signs differ, a is smaller if it's the negative one.
+    option_wire(&mut h, ("in:a", 0), ("xor1", 0), "a[15]");
+    option_wire(&mut h, ("in:b", 0), ("xor1", 1), "b[15]");
+    wire(&mut h, ("not2", 0), ("mux1", 0), None);
+    wire(&mut h, ("in:a", 0), ("mux1", 1), Some("a[15]"));
+    wire(&mut h, ("xor1", 0), ("mux1", 2), None);
+    wire(&mut h, ("mux1", 0), ("out:lt", 0), None);
+    shot(&mut h, "compare16");
+
+    let text = chip_text(&dir, "Compare16.chip");
+    for line in [
+        "not1 = Not(b)",
+        "diff = Add16(a, not1, 1)",
+        "not2 = Not(diff.cout)",
+        "or1 = Or(diff.sum[15:8], diff.sum[7:0])",
+        "or2 = Or(or1[7:4], or1[3:0])",
+        "or3 = Or(or2[3:2], or2[1:0])",
+        "or4 = Or(or3[1], or3[0])",
+        "not3 = Not(or4)",
+        "xor1 = Xor(a[15], b[15])",
+        "mux1 = Mux(not2, a[15], xor1)",
+        "ult = not2",
+        "eq = not3",
+        "lt = mux1",
+    ] {
+        assert!(text.contains(line), "missing `{line}`:\n{text}");
+    }
+    let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "Compare16");
+    assert!(results.passed(), "Compare16's tests fail:\n{text}");
 }

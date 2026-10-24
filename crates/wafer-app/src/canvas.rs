@@ -76,6 +76,8 @@ pub struct Canvas {
     /// Asking which bits a wire carries, after one was dropped between
     /// pins of different widths.
     bit_picker: Option<BitPicker>,
+    /// The number typed into a pin's right-click menu.
+    constant_text: String,
     offset: Vec2,
     zoom: f32,
     pub selection: BTreeSet<String>,
@@ -105,6 +107,7 @@ impl Canvas {
             prefix: String::new(),
             make_chip: None,
             bit_picker: None,
+            constant_text: String::new(),
             chip,
             offset: Vec2::ZERO,
             zoom: 1.0,
@@ -679,8 +682,8 @@ impl Canvas {
         let shown = self.copies(ws).max(1);
         let (sink_width, source_width) = (sink_pin.width / shown, source_pin.width / shown);
         let at = self.screen_pos((sink_pin.x, sink_pin.y)) + vec2(14.0, -12.0);
-        let adapts = adapts_to_wire(ws, &self.chip, &s.nodes[sink.0], Some(sink.1))
-            || adapts_to_wire(ws, &self.chip, &s.nodes[source.0], None);
+        let sink_adapts = adapts_to_wire(ws, &self.chip, &s.nodes[sink.0], Some(sink.1));
+        let adapts = sink_adapts || adapts_to_wire(ws, &self.chip, &s.nodes[source.0], None);
         // A 1-bit signal feeds every copy of a chip spread across a bus.
         let feeds_every_copy = source_width == 1 && copies_of(ws, &self.chip, &s.nodes[sink.0]) > 1;
         let (Some(sink), Some(source)) = (sink_of(s, sink.0, sink.1), source_text(s, source.0, source.1)) else {
@@ -695,10 +698,19 @@ impl Canvas {
             Sink::Output(name) => name.clone(),
         };
         // Free picking starts with as much of the source as fits, at bit 0.
-        let take = source_width.min(sink_width).max(1);
+        let take = if sink_adapts { source_width } else { source_width.min(sink_width).max(1) };
         let free = choose.then_some(FreePick { hi: take - 1, lo: 0, at: 0 });
-        self.bit_picker =
-            Some(BitPicker { sink, sink_label, sink_width, source, source_width, screen: at, custom: 0, free });
+        self.bit_picker = Some(BitPicker {
+            sink,
+            sink_label,
+            sink_width,
+            sink_adapts,
+            source,
+            source_width,
+            screen: at,
+            custom: 0,
+            free,
+        });
     }
 
     /// Picks any bits of the source and where they land in the pin.
@@ -711,20 +723,52 @@ impl Canvas {
     /// The free side of the bit picker. Returns the edit to make, if any.
     fn free_pick_ui(ui: &mut egui::Ui, picker: &mut BitPicker) -> Option<Edit> {
         let (sw, kw) = (picker.source_width, picker.sink_width);
-        let mut chosen = None;
+        let source = picker.source.clone();
+        let slice = |hi: usize, lo: usize| match (hi, lo) {
+            (hi, 0) if hi + 1 == sw => source.clone(),
+            (hi, lo) if hi == lo => format!("{source}[{lo}]"),
+            (hi, lo) => format!("{source}[{hi}:{lo}]"),
+        };
+        let button = |ui: &mut egui::Ui, text: &str| ui.button(egui::RichText::new(text).monospace()).clicked();
+        // A whole-pin connection to `source[hi:lo]`, or bits placed in the pin.
+        let mut whole: Option<(usize, usize)> = None;
+        let mut placed: Option<FreePick> = None;
         let mut pick = picker.free.unwrap_or(FreePick { hi: 0, lo: 0, at: 0 });
         ui.label(format!("Wire bits of {} into {}", picker.source, picker.sink_label));
-        if sw == kw && sw > 1 {
+        if picker.sink_adapts && sw > 1 {
+            // The pin takes any width: the usual picks are a half or an end bit.
+            let mut picks = vec![(sw - 1, sw - 1)];
+            if sw.is_multiple_of(2) && sw > 2 {
+                picks.extend([(sw - 1, sw / 2), (sw / 2 - 1, 0)]);
+            }
+            picks.push((0, 0));
+            ui.horizontal_wrapped(|ui| {
+                for (hi, lo) in picks {
+                    if button(ui, &slice(hi, lo)) {
+                        whole = Some((hi, lo));
+                    }
+                }
+            });
+        } else if sw == kw && sw > 1 {
             // Shifts, the usual reason to wire bits by hand.
             ui.horizontal_wrapped(|ui| {
                 for k in [1, 2, 4, 8].into_iter().filter(|&k| k < sw) {
-                    if ui.button(egui::RichText::new(format!("<< {k}")).monospace()).clicked() {
-                        chosen = Some(FreePick { hi: sw - 1 - k, lo: 0, at: k });
+                    if button(ui, &format!("<< {k}")) {
+                        placed = Some(FreePick { hi: sw - 1 - k, lo: 0, at: k });
                     }
                 }
                 for k in [1, 2, 4, 8].into_iter().filter(|&k| k < sw) {
-                    if ui.button(egui::RichText::new(format!(">> {k}")).monospace()).clicked() {
-                        chosen = Some(FreePick { hi: sw - 1, lo: k, at: 0 });
+                    if button(ui, &format!(">> {k}")) {
+                        placed = Some(FreePick { hi: sw - 1, lo: k, at: 0 });
+                    }
+                }
+            });
+        } else if sw > kw && sw.is_multiple_of(kw) && sw / kw <= 16 {
+            // Pieces the size of the pin, highest first.
+            ui.horizontal_wrapped(|ui| {
+                for lo in (0..sw / kw).rev().map(|k| k * kw) {
+                    if button(ui, &slice(lo + kw - 1, lo)) {
+                        whole = Some((lo + kw - 1, lo));
                     }
                 }
             });
@@ -737,26 +781,48 @@ impl Canvas {
             ui.add(egui::DragValue::new(&mut pick.lo).range(0..=sw - 1));
             ui.label(egui::RichText::new("]").monospace());
         });
-        ui.horizontal(|ui| {
-            ui.label("into");
-            ui.label(egui::RichText::new(&picker.sink_label).monospace());
-            ui.label("from bit");
-            ui.add(egui::DragValue::new(&mut pick.at).range(0..=kw - 1));
-        });
+        if !picker.sink_adapts {
+            ui.horizontal(|ui| {
+                ui.label("into");
+                ui.label(egui::RichText::new(&picker.sink_label).monospace());
+                ui.label("from bit");
+                ui.add(egui::DragValue::new(&mut pick.at).range(0..=kw - 1));
+            });
+        }
         picker.free = Some(pick);
         let n = pick.hi.checked_sub(pick.lo).map(|d| d + 1);
+        let bits = |hi: usize, lo: usize| if hi == lo { format!("[{lo}]") } else { format!("[{hi}:{lo}]") };
         match n {
-            Some(n) if pick.at + n <= kw => {
-                let to = if n == 1 { format!("[{}]", pick.at) } else { format!("[{}:{}]", pick.at + n - 1, pick.at) };
-                let from = if n == 1 { format!("[{}]", pick.lo) } else { format!("[{}:{}]", pick.hi, pick.lo) };
+            Some(n) if picker.sink_adapts => {
                 ui.label(
-                    egui::RichText::new(format!("{}{to} ← {}{from}", picker.sink_label, picker.source))
+                    egui::RichText::new(format!("{} ← {}", picker.sink_label, slice(pick.hi, pick.lo)))
                         .monospace()
                         .color(theme::BUS),
                 );
+                ui.label(
+                    egui::RichText::new(format!("It becomes {n} bit{} wide.", if n == 1 { "" } else { "s" }))
+                        .color(theme::MUTED)
+                        .small(),
+                );
+                if ui.button("Connect").clicked() {
+                    whole = Some((pick.hi, pick.lo));
+                }
+            }
+            Some(n) if pick.at + n <= kw => {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}{} ← {}{}",
+                        picker.sink_label,
+                        bits(pick.at + n - 1, pick.at),
+                        picker.source,
+                        bits(pick.hi, pick.lo)
+                    ))
+                    .monospace()
+                    .color(theme::BUS),
+                );
                 ui.label(egui::RichText::new("Bits you don't wire read 0.").color(theme::MUTED).small());
                 if ui.button("Connect").clicked() {
-                    chosen = Some(pick);
+                    placed = Some(pick);
                 }
             }
             Some(n) => {
@@ -774,18 +840,19 @@ impl Canvas {
                 ui.label(egui::RichText::new("The first bit has to be the higher one.").color(theme::UNKNOWN));
             }
         }
-        let pick = chosen?;
+        if let Some((hi, lo)) = whole {
+            return Some(Edit::Connect { sink: picker.sink.clone(), source: slice(hi, lo) });
+        }
+        let pick = placed?;
         let n = pick.hi - pick.lo + 1;
-        let source = match (pick.hi, pick.lo) {
-            (hi, 0) if hi + 1 == sw => picker.source.clone(),
-            (hi, lo) if hi == lo => format!("{}[{lo}]", picker.source),
-            (hi, lo) => format!("{}[{hi}:{lo}]", picker.source),
-        };
-        Some(Edit::ConnectBits { sink: picker.sink.clone(), hi: pick.at + n - 1, lo: pick.at, source })
+        Some(Edit::ConnectBits {
+            sink: picker.sink.clone(),
+            hi: pick.at + n - 1,
+            lo: pick.at,
+            source: slice(pick.hi, pick.lo),
+        })
     }
 
-    /// Which bits a wire between pins of different widths carries: a
-    /// slice of the wider source, or a slice of the wider pin it fills.
     fn bit_picker_ui(&mut self, ui: &mut egui::Ui, ws: &mut Workspace) {
         let Some(picker) = &mut self.bit_picker else { return };
         if picker.free.is_some() {
@@ -1049,10 +1116,50 @@ impl Canvas {
         let at = ui.input(|i| i.pointer.interact_pos()).unwrap_or(self.rect.center());
         match self.context {
             Hit::InPin(n, p) => {
-                if ui.button("Disconnect this pin").clicked() {
-                    if let Some(sink) = sink_of(s, n, p) {
-                        ws.edit(&self.chip, &[Edit::Disconnect { sink }], &[]);
+                let Some(sink) = sink_of(s, n, p) else { return };
+                let width = s.nodes[n].inputs.get(p).map_or(1, |pin| pin.width) / self.copies(ws).max(1);
+                let mut value: Option<String> = None;
+                if ui.button("Set to 0").clicked() {
+                    value = Some("0".into());
+                }
+                let one = if width > 1 { format!("Set to 1 ({})", constant_text(1, width)) } else { "Set to 1".into() };
+                if ui.button(one).clicked() {
+                    value = Some("1".into());
+                }
+                if width > 1 {
+                    let all = constant_text(u64::MAX >> (64 - width.min(64)), width);
+                    if ui.button(format!("Set to all 1s ({all})")).clicked() {
+                        value = Some(all);
                     }
+                    ui.horizontal(|ui| {
+                        ui.label("Set to");
+                        let field = ui.add(
+                            egui::TextEdit::singleline(&mut self.constant_text)
+                                .hint_text("0x2A")
+                                .desired_width(70.0)
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                            value = Some(self.constant_text.trim().to_string());
+                        }
+                    });
+                }
+                if let Some(value) = value {
+                    match parse_constant(&value) {
+                        Some(v) if width >= 64 || v >> width == 0 => {
+                            ws.edit(&self.chip, &[Edit::Connect { sink: sink.clone(), source: value }], &[]);
+                            self.constant_text.clear();
+                        }
+                        Some(_) => ws.status = Some((format!("{value} doesn't fit in {width} bits"), true)),
+                        None => {
+                            ws.status = Some((format!("`{value}` isn't a number (try 42, 0x2A or 0b101010)"), true))
+                        }
+                    }
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Disconnect this pin").clicked() {
+                    ws.edit(&self.chip, &[Edit::Disconnect { sink }], &[]);
                     ui.close();
                 }
             }
@@ -1518,6 +1625,9 @@ struct BitPicker {
     /// The pin as the question names it: `sum`, or `lo.a`.
     sink_label: String,
     sink_width: usize,
+    /// The pin takes whatever width is wired to it (a fresh gate or 1-bit
+    /// chip), so any bits can go in, starting at bit 0.
+    sink_adapts: bool,
     /// As written in the file: `a`, `lo.sum`.
     source: String,
     source_width: usize,
@@ -1564,6 +1674,24 @@ fn adapts_to_wire(ws: &Workspace, chip: &str, node: &schematic::Node, input: Opt
         return false;
     }
     !inst.inputs.iter().enumerate().any(|(p, e)| Some(p) != input && e.is_some() && kind.port_width(p) == group)
+}
+
+/// `0x0001` for a bus, written with as many digits as it's wide.
+fn constant_text(value: u64, width: usize) -> String {
+    if width.is_multiple_of(4) { format!("0x{value:0w$X}", w = width / 4) } else { format!("0b{value:0width$b}") }
+}
+
+/// `42`, `0x2A` or `0b101010`.
+fn parse_constant(text: &str) -> Option<u64> {
+    let text = text.trim().replace('_', "");
+    let lower = text.to_ascii_lowercase();
+    if let Some(hex) = lower.strip_prefix("0x") {
+        u64::from_str_radix(hex, 16).ok()
+    } else if let Some(bin) = lower.strip_prefix("0b") {
+        u64::from_str_radix(bin, 2).ok()
+    } else {
+        lower.parse().ok()
+    }
 }
 
 /// How many copies a chip box runs, as the file says (1 for anything else).

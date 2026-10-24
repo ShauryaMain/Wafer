@@ -1,0 +1,42 @@
+// Compares two 16-bit numbers. `eq` is 1 when a equals b; `ult` is 1 when
+// a < b as plain (unsigned) numbers, 0 to 65535; `lt` is 1 when a < b as
+// signed numbers, -32768 to 32767, where bit 15 set means negative. ALU16
+// turns these into Crumb's =, u< and < (with a as N and b as T).
+//
+// It works by subtracting: a - b is a + (not b) + 1, and the adder's carry
+// out is 1 exactly when a >= b, with no borrow.
+chip Compare16 {
+  in  a[16], b[16]
+  out eq, lt, ult
+  not1 = Not(b)
+  Diff = Add16(a, not1, 1)
+  not2 = Not(Diff.cout)
+  or1 = Or(Diff.sum[15:8], Diff.sum[7:0])
+  or2 = Or(or1[7:4], or1[3:0])
+  or3 = Or(or2[3:2], or2[1:0])
+  or4 = Or(or3[1], or3[0])
+  not3 = Not(or4)
+  xor1 = Xor(a[15], b[15])
+  mux1 = Mux(not2, a[15], xor1)
+  ult = not2
+  eq = not3
+  lt = mux1
+}
+
+test Compare16 {
+  // a      b      | eq lt ult
+     0x0000 0x0000 | 1  0  0
+     0x0001 0x0002 | 0  1  1
+     0x0002 0x0001 | 0  0  0
+     0xFFFF 0x0001 | 0  1  0   // -1 < 1 signed, but 65535 > 1 unsigned
+     0x0001 0xFFFF | 0  0  1
+     0x8000 0x7FFF | 0  1  0   // the most negative number vs the most positive
+     0x7FFF 0x8000 | 0  0  1
+     0x1234 0x1234 | 1  0  0
+     0x8000 0x8000 | 1  0  0
+     0xFFFE 0xFFFF | 0  1  1   // -2 < -1, and 65534 < 65535
+     0x0100 0x00FF | 0  0  0
+     0xABCD 0xABCE | 0  1  1
+     0x0000 0x8000 | 0  0  1
+     0xFFFF 0xFFFF | 1  0  0
+}

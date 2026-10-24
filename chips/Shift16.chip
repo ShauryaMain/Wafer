@@ -7,15 +7,15 @@
 chip Shift16 {
   in  a[16], by[4]
   out left[16], right[16]
-  mux1 = Mux(a, {a[14:0], 0b0}, by[0])
-  mux2 = Mux(mux1, {mux1[13:0], 0b00}, by[1])
-  mux3 = Mux(mux2, {mux2[11:0], 0x0}, by[2])
-  mux4 = Mux(mux3, {mux3[7:0], 0x00}, by[3])
-  mux5 = Mux(a, {0b0, a[15:1]}, by[0])
-  mux6 = Mux(mux5, {0b00, mux5[15:2]}, by[1])
-  mux7 = Mux(mux6, {0x0, mux6[15:4]}, by[2])
-  mux8 = Mux(mux7, {0x00, mux7[15:8]}, by[3])
-  left = mux4
+  mux1  = Mux(a, {a[14:0], 0b0}, by[0])
+  mux2  = Mux(mux1, {mux1[13:0], 0b00}, by[1])
+  mux3  = Mux(mux2, {mux2[11:0], 0x0}, by[2])
+  mux4  = Mux(mux3, {mux3[7:0], 0x00}, by[3])
+  mux5  = Mux(a, {0b0, a[15:1]}, by[0])
+  mux6  = Mux(mux5, {0b00, mux5[15:2]}, by[1])
+  mux7  = Mux(mux6, {0x0, mux6[15:4]}, by[2])
+  mux8  = Mux(mux7, {0x00, mux7[15:8]}, by[3])
+  left  = mux4
   right = mux8
 }
 
