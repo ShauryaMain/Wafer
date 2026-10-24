@@ -684,8 +684,11 @@ impl Canvas {
         let at = self.screen_pos((sink_pin.x, sink_pin.y)) + vec2(14.0, -12.0);
         let sink_adapts = adapts_to_wire(ws, &self.chip, &s.nodes[sink.0], Some(sink.1));
         let adapts = sink_adapts || adapts_to_wire(ws, &self.chip, &s.nodes[source.0], None);
-        // A 1-bit signal feeds every copy of a chip spread across a bus.
-        let feeds_every_copy = source_width == 1 && copies_of(ws, &self.chip, &s.nodes[sink.0]) > 1;
+        // A 1-bit signal feeds every copy of a chip spread across a bus, so
+        // from anything else of the wrong width, the question is which bit.
+        let spread = copies_of(ws, &self.chip, &s.nodes[sink.0]) > 1;
+        let feeds_every_copy = source_width == 1 && spread;
+        let sink_width = if spread && source_width != sink_width && !choose { 1 } else { sink_width };
         let (Some(sink), Some(source)) = (sink_of(s, sink.0, sink.1), source_text(s, source.0, source.1)) else {
             return;
         };
@@ -1126,19 +1129,24 @@ impl Canvas {
                 if ui.button(one).clicked() {
                     value = Some("1".into());
                 }
+                let adapts = adapts_to_wire(ws, &self.chip, &s.nodes[n], Some(p));
                 if width > 1 {
                     let all = constant_text(u64::MAX >> (64 - width.min(64)), width);
                     if ui.button(format!("Set to all 1s ({all})")).clicked() {
                         value = Some(all);
                     }
+                }
+                if width > 1 || adapts {
                     ui.horizontal(|ui| {
-                        ui.label("Set to");
-                        let field = ui.add(
-                            egui::TextEdit::singleline(&mut self.constant_text)
-                                .hint_text("0x2A")
-                                .desired_width(70.0)
-                                .font(egui::TextStyle::Monospace),
-                        );
+                        let label = ui.label("Set to");
+                        let field = ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.constant_text)
+                                    .hint_text("0x2A")
+                                    .desired_width(70.0)
+                                    .font(egui::TextStyle::Monospace),
+                            )
+                            .labelled_by(label.id);
                         if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                             value = Some(self.constant_text.trim().to_string());
                         }
@@ -1146,7 +1154,8 @@ impl Canvas {
                 }
                 if let Some(value) = value {
                     match parse_constant(&value) {
-                        Some(v) if width >= 64 || v >> width == 0 => {
+                        // A pin that adapts takes the number's width, like `0xFFFF`.
+                        Some(v) if adapts || width >= 64 || v >> width == 0 => {
                             ws.edit(&self.chip, &[Edit::Connect { sink: sink.clone(), source: value }], &[]);
                             self.constant_text.clear();
                         }
@@ -1673,7 +1682,11 @@ fn adapts_to_wire(ws: &Workspace, chip: &str, node: &schematic::Node, input: Opt
     if group == PortWidth::Bit || (group == PortWidth::Bus && kind.fixed_width().is_some()) {
         return false;
     }
-    !inst.inputs.iter().enumerate().any(|(p, e)| Some(p) != input && e.is_some() && kind.port_width(p) == group)
+    // A plain number doesn't fix the width: `0` fits any bus.
+    let fixes = |e: &Option<wafer_core::ast::Expr>| {
+        e.as_ref().is_some_and(|e| !matches!(e.kind, wafer_core::ast::ExprKind::Literal(_)))
+    };
+    !inst.inputs.iter().enumerate().any(|(p, e)| Some(p) != input && fixes(e) && kind.port_width(p) == group)
 }
 
 /// `0x0001` for a bus, written with as many digits as it's wide.

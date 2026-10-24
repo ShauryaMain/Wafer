@@ -34,9 +34,14 @@ fn example_project(name: &str) -> PathBuf {
 }
 
 fn open(dir: &Path) -> Harness<'static, WaferApp> {
+    open_sized(dir, egui::vec2(1400.0, 860.0))
+}
+
+/// A bigger window, for chips with a lot of boxes.
+fn open_sized(dir: &Path, size: egui::Vec2) -> Harness<'static, WaferApp> {
     let dir = dir.to_path_buf();
     let mut harness = Harness::builder()
-        .with_size(egui::vec2(1400.0, 860.0))
+        .with_size(size)
         .with_step_dt(1.0 / 60.0)
         .wgpu()
         .build_eframe(move |cc| WaferApp::new(cc, dir));
@@ -973,4 +978,231 @@ fn builds_compare16_with_constants_and_bit_picks() {
     }
     let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "Compare16");
     assert!(results.passed(), "Compare16's tests fail:\n{text}");
+}
+
+/// Empties a chip in a copied project, keeping its ports and tests.
+fn reset_chip(dir: &Path, chip: &str, ports: &str) {
+    let real = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../chips/{chip}.chip")))
+        .unwrap();
+    let tests = &real[real.find(&format!("test {chip}")).unwrap()..];
+    std::fs::write(dir.join(format!("{chip}.chip")), format!("chip {chip} {{\n{ports}}}\n\n{tests}")).unwrap();
+    let _ = std::fs::remove_file(dir.join(format!("{chip}.layout.json")));
+}
+
+/// Builds Mux4 and then ALU16 on the canvas the way the guide in the chat
+/// says to.
+#[test]
+fn builds_mux4_and_alu16() {
+    let dir = example_project("alu16");
+    reset_chip(&dir, "Mux4", "  in  a, b, c, d, s0, s1\n  out out\n");
+    reset_chip(&dir, "ALU16", "  in  t[16], n[16], r[16], mem[16], op[4]\n  out out[16]\n");
+    let mut h = open_sized(&dir, egui::vec2(2600.0, 1900.0));
+
+    let wire = |h: &mut Harness<'static, WaferApp>, from: (&str, usize), to: (&str, usize), pick: Option<&str>| {
+        let (a, b) = (pin(h, from.0, true, from.1), pin(h, to.0, false, to.1));
+        drag(h, a, b);
+        if let Some(label) = pick {
+            h.get_by_label(label).click();
+            h.run_steps(3);
+        }
+    };
+    let set = |h: &mut Harness<'static, WaferApp>, to: (&str, usize), item: &str| {
+        let at = pin(h, to.0, false, to.1);
+        right_click(h, at);
+        h.get_by_label(item).click();
+        h.run_steps(3);
+    };
+    let type_value = |h: &mut Harness<'static, WaferApp>, to: (&str, usize), value: &str| {
+        let at = pin(h, to.0, false, to.1);
+        right_click(h, at);
+        h.get(by().label("Set to").role(egui::accesskit::Role::TextInput)).focus();
+        h.run_steps(1);
+        h.event(Event::Text(value.into()));
+        h.run_steps(1);
+        h.key_press(Key::Enter);
+        h.run_steps(3);
+    };
+    // Lays boxes out on a grid, like dragging them into place by hand.
+    let arrange = |h: &mut Harness<'static, WaferApp>, chip: &str, grid: &[(&str, (f32, f32))]| {
+        let positions = grid.iter().map(|(k, at)| (k.to_string(), *at)).collect();
+        h.state_mut().state.ws.move_nodes(chip, positions);
+        h.run_steps(2);
+        let c = h.state().state.canvas.rect().center();
+        h.hover_at(c);
+        h.run_steps(1);
+        h.key_press(Key::F);
+        h.run_steps(3);
+    };
+
+    // Part 1: Mux4 from three Muxes.
+    h.state_mut().state.open_chip("Mux4");
+    h.run_steps(3);
+    let c = h.state().state.canvas.rect().center();
+    for x in [-150.0, 0.0, 150.0] {
+        add(&mut h, c + vec2(x, 0.0), "Mux");
+    }
+    arrange(
+        &mut h,
+        "Mux4",
+        &[("in:a", (0.0, 0.0)), ("in:b", (0.0, 50.0)), ("in:c", (0.0, 140.0)), ("in:d", (0.0, 190.0))]
+            .into_iter()
+            .chain([("in:s0", (0.0, 270.0)), ("in:s1", (0.0, 320.0))])
+            .chain([("mux1", (160.0, 10.0)), ("mux2", (160.0, 150.0)), ("mux3", (320.0, 80.0))])
+            .chain([("out:out", (460.0, 95.0))])
+            .collect::<Vec<_>>(),
+    );
+    for (from, to) in [
+        (("in:a", 0), ("mux1", 0)),
+        (("in:b", 0), ("mux1", 1)),
+        (("in:s0", 0), ("mux1", 2)),
+        (("in:c", 0), ("mux2", 0)),
+        (("in:d", 0), ("mux2", 1)),
+        (("in:s0", 0), ("mux2", 2)),
+        (("mux1", 0), ("mux3", 0)),
+        (("mux2", 0), ("mux3", 1)),
+        (("in:s1", 0), ("mux3", 2)),
+        (("mux3", 0), ("out:out", 0)),
+    ] {
+        wire(&mut h, from, to, None);
+    }
+    let text = chip_text(&dir, "Mux4.chip");
+    for line in ["mux1 = Mux(a, b, s0)", "mux2 = Mux(c, d, s0)", "mux3 = Mux(mux1, mux2, s1)", "out = mux3"] {
+        assert!(text.contains(line), "missing `{line}`:\n{text}");
+    }
+    assert!(wafer_app::simrun::TestResults::run(&h.state().state.ws, "Mux4").passed(), "Mux4 fails:\n{text}");
+
+    // Part 2: ALU16. Step 1: every part, laid out in rows.
+    h.state_mut().state.open_chip("ALU16");
+    h.run_steps(3);
+    let c = h.state().state.canvas.rect().center();
+    let parts = [
+        "Not",
+        "Add16",
+        "Add16",
+        "Add16",
+        "And",
+        "Or",
+        "Xor",
+        "Compare16",
+        "Mux",
+        "Mux",
+        "Mux",
+        "Shift16",
+        "Mux4",
+        "Mux4",
+        "Mux4",
+        "Mux4",
+        "Mux4",
+    ];
+    for (i, part) in parts.into_iter().enumerate() {
+        let (col, row) = ((i % 6) as f32, (i / 6) as f32);
+        add(&mut h, c + vec2(-330.0 + col * 130.0, -150.0 + row * 140.0), part);
+    }
+    let col = |x: usize| 220.0 + x as f32 * 200.0;
+    arrange(
+        &mut h,
+        "ALU16",
+        &[
+            ("in:t", (0.0, 0.0)),
+            ("in:n", (0.0, 120.0)),
+            ("in:r", (0.0, 900.0)),
+            ("in:mem", (0.0, 1000.0)),
+            ("in:op", (0.0, 1150.0)),
+            ("not1", (col(0), 0.0)),
+            ("add16_1", (col(1), 0.0)),
+            ("add16_2", (col(1), 150.0)),
+            ("add16_3", (col(1), 300.0)),
+            ("and1", (col(0), 450.0)),
+            ("or1", (col(0), 560.0)),
+            ("xor1", (col(0), 670.0)),
+            ("compare16_1", (col(1), 500.0)),
+            ("mux1", (col(2), 450.0)),
+            ("mux2", (col(2), 550.0)),
+            ("mux3", (col(2), 650.0)),
+            ("shift16_1", (col(1), 760.0)),
+            ("mux4_1", (col(3), 0.0)),
+            ("mux4_2", (col(3), 300.0)),
+            ("mux4_3", (col(3), 600.0)),
+            ("mux4_4", (col(3), 900.0)),
+            ("mux4_5", (col(4), 450.0)),
+            ("out:out", (col(5), 520.0)),
+        ],
+    );
+    for (key, name) in
+        [("add16_1", "add"), ("add16_2", "sub"), ("add16_3", "dec"), ("compare16_1", "cmp"), ("shift16_1", "shift")]
+    {
+        rename(&mut h, key, key, name);
+    }
+
+    // Step 2: add, subtract, minus one.
+    wire(&mut h, ("in:t", 0), ("not1", 0), None);
+    wire(&mut h, ("in:t", 0), ("add", 0), None);
+    wire(&mut h, ("in:n", 0), ("add", 1), None);
+    set(&mut h, ("add", 2), "Set to 0");
+    wire(&mut h, ("in:n", 0), ("sub", 0), None);
+    wire(&mut h, ("not1", 0), ("sub", 1), None);
+    set(&mut h, ("sub", 2), "Set to 1");
+    wire(&mut h, ("in:t", 0), ("dec", 0), None);
+    set(&mut h, ("dec", 1), "Set to all 1s (0xFFFF)");
+    set(&mut h, ("dec", 2), "Set to 0");
+    // Step 3: and, or, xor.
+    for gate in ["and1", "or1", "xor1"] {
+        wire(&mut h, ("in:t", 0), (gate, 0), None);
+        wire(&mut h, ("in:n", 0), (gate, 1), None);
+    }
+    // Step 4: comparisons, widened to Forth flags.
+    wire(&mut h, ("in:n", 0), ("cmp", 0), None);
+    wire(&mut h, ("in:t", 0), ("cmp", 1), None);
+    for (mux, flag) in [("mux1", 0), ("mux2", 1), ("mux3", 2)] {
+        set(&mut h, (mux, 0), "Set to 0");
+        type_value(&mut h, (mux, 1), "0xFFFF");
+        wire(&mut h, ("cmp", flag), (mux, 2), None);
+    }
+    // Step 5: shifts.
+    wire(&mut h, ("in:n", 0), ("shift", 0), None);
+    wire(&mut h, ("in:t", 0), ("shift", 1), Some("t[3:0]"));
+    // Step 6: pick within each group of four, then pick the group.
+    let groups = [
+        ("mux4_1", [("in:t", 0), ("in:n", 0), ("add", 0), ("sub", 0)]),
+        ("mux4_2", [("and1", 0), ("or1", 0), ("xor1", 0), ("not1", 0)]),
+        ("mux4_3", [("mux1", 0), ("mux2", 0), ("mux3", 0), ("shift", 0)]),
+        ("mux4_4", [("shift", 1), ("in:mem", 0), ("in:r", 0), ("dec", 0)]),
+        ("mux4_5", [("mux4_1", 0), ("mux4_2", 0), ("mux4_3", 0), ("mux4_4", 0)]),
+    ];
+    for (mux4, inputs) in groups {
+        for (pin_index, from) in inputs.into_iter().enumerate() {
+            wire(&mut h, from, (mux4, pin_index), None);
+        }
+        let (s0, s1) = if mux4 == "mux4_5" { ("op[2]", "op[3]") } else { ("op[0]", "op[1]") };
+        wire(&mut h, ("in:op", 0), (mux4, 4), Some(s0));
+        wire(&mut h, ("in:op", 0), (mux4, 5), Some(s1));
+    }
+    wire(&mut h, ("mux4_5", 0), ("out:out", 0), None);
+    shot(&mut h, "alu16");
+
+    let text = chip_text(&dir, "ALU16.chip");
+    for line in [
+        "not1 = Not(t)",
+        "add = Add16(t, n, 0)",
+        "sub = Add16(n, not1, 1)",
+        "dec = Add16(t, 0xFFFF, 0)",
+        "and1 = And(t, n)",
+        "or1 = Or(t, n)",
+        "xor1 = Xor(t, n)",
+        "cmp = Compare16(n, t)",
+        "mux1 = Mux(0, 0xFFFF, cmp.eq)",
+        "mux2 = Mux(0, 0xFFFF, cmp.lt)",
+        "mux3 = Mux(0, 0xFFFF, cmp.ult)",
+        "shift = Shift16(n, t[3:0])",
+        "mux4_1 = Mux4(t, n, add.sum, sub.sum, op[0], op[1])",
+        "mux4_2 = Mux4(and1, or1, xor1, not1, op[0], op[1])",
+        "mux4_3 = Mux4(mux1, mux2, mux3, shift.left, op[0], op[1])",
+        "mux4_4 = Mux4(shift.right, mem, r, dec.sum, op[0], op[1])",
+        "mux4_5 = Mux4(mux4_1, mux4_2, mux4_3, mux4_4, op[2], op[3])",
+        "out = mux4_5",
+    ] {
+        assert!(text.contains(line), "missing `{line}`:\n{text}");
+    }
+    let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "ALU16");
+    assert!(results.passed(), "ALU16's tests fail:\n{text}");
 }

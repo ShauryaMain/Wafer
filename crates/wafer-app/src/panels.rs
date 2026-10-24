@@ -21,6 +21,21 @@ fn mono(text: impl Into<String>) -> RichText {
 }
 
 pub fn chips(ui: &mut egui::Ui, state: &mut AppState) {
+    // New chip stays on top, out of the scrolling lists, so a chip with a
+    // lot inside can't push it out of view.
+    heading(ui, "NEW CHIP");
+    ui.horizontal(|ui| {
+        let field = ui.add(egui::TextEdit::singleline(&mut state.new_chip).hint_text("Name").desired_width(110.0));
+        let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if (ui.button("Create").clicked() || enter) && !state.new_chip.trim().is_empty() {
+            let name = state.new_chip.trim().to_string();
+            if state.ws.new_chip(&name) {
+                state.new_chip.clear();
+                state.open_chip(&name);
+            }
+        }
+    });
+    ui.add_space(8.0);
     egui::ScrollArea::vertical().show(ui, |ui| {
         heading(ui, "CHIPS");
         let current = state.canvas.root.clone();
@@ -53,20 +68,6 @@ pub fn chips(ui: &mut egui::Ui, state: &mut AppState) {
                 state.canvas.set_path(path);
             }
         }
-
-        ui.add_space(12.0);
-        heading(ui, "NEW CHIP");
-        ui.horizontal(|ui| {
-            let field = ui.add(egui::TextEdit::singleline(&mut state.new_chip).hint_text("Name").desired_width(110.0));
-            let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (ui.button("Create").clicked() || enter) && !state.new_chip.trim().is_empty() {
-                let name = state.new_chip.trim().to_string();
-                if state.ws.new_chip(&name) {
-                    state.new_chip.clear();
-                    state.open_chip(&name);
-                }
-            }
-        });
     });
 }
 

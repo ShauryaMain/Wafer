@@ -1,0 +1,23 @@
+// Picks one of four inputs: `a` when s1 s0 is 00, `b` for 01, `c` for 10
+// and `d` for 11. Its pins are all 1 bit, so on 16-bit buses it's 16 Mux4s
+// side by side, and ALU16 uses five of them to pick one of its 16 results.
+chip Mux4 {
+  in  a, b, c, d, s0, s1
+  out out
+  mux1 = Mux(a, b, s0)
+  mux2 = Mux(c, d, s0)
+  mux3 = Mux(mux1, mux2, s1)
+  out = mux3
+}
+
+test Mux4 {
+  // a b c d s0 s1 | out
+     1 0 0 0 0  0  | 1     // s1 s0 = 00 picks a
+     0 1 1 1 0  0  | 0
+     0 1 0 0 1  0  | 1     // 01 picks b
+     1 0 1 1 1  0  | 0
+     0 0 1 0 0  1  | 1     // 10 picks c
+     1 1 0 1 0  1  | 0
+     0 0 0 1 1  1  | 1     // 11 picks d
+     1 1 1 0 1  1  | 0
+}
