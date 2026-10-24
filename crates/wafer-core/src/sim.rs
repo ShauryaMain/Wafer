@@ -72,7 +72,8 @@ fn solid(v: Logic) -> Logic {
 
 impl Simulator {
     /// Starts with every input at 0, gate and flip-flop outputs unknown (X),
-    /// RAM cleared to 0, and undriven nets disconnected (Z).
+    /// RAM cleared to 0, Roms holding their programs, and undriven nets
+    /// disconnected (Z).
     pub fn new(netlist: Netlist) -> Simulator {
         let n = netlist.net_count;
         let mut values = vec![Logic::Z; n];
@@ -137,9 +138,11 @@ impl Simulator {
             .iter()
             .map(|r| vec![Logic::Zero; (1usize << r.addr.len().min(MAX_ADDRESS_BITS)) * r.data.len()])
             .collect();
+        let roms: Vec<(usize, std::sync::Arc<Vec<u64>>)> =
+            netlist.rams.iter().enumerate().filter_map(|(i, r)| Some((i, r.rom.clone()?))).collect();
 
         let (gates, rams) = (netlist.gates.len(), netlist.rams.len());
-        Simulator {
+        let mut sim = Simulator {
             netlist,
             values,
             fanout_start,
@@ -155,7 +158,11 @@ impl Simulator {
             changed: Vec::new(),
             time: 0,
             ticks: 0,
+        };
+        for (ram, words) in roms {
+            sim.load_memory(ram, &words);
         }
+        sim
     }
 
     pub fn netlist(&self) -> &Netlist {
@@ -514,5 +521,29 @@ mod tests {
         )]);
         let design = Design::check(&project);
         assert!(design.diagnostics.iter().any(|d| d.message.contains("is a shared wire")), "{:#?}", design.diagnostics);
+    }
+
+    #[test]
+    fn roms_hold_their_program() {
+        let project = Project::from_sources(vec![
+            ("t.chip".into(), "chip T {\n in addr[4]\n out word[16]\n word = Rom(addr, file: \"t.asm\")\n}".into()),
+            ("t.asm".into(), "table squares 0 1 4 9 16 25 end\n: main halt ;".into()),
+        ]);
+        let design = Design::check(&project);
+        assert!(!design.has_errors(), "{:#?}", design.diagnostics);
+        let mut sim = Simulator::new(Netlist::build(&design, "T").unwrap());
+        let read = |sim: &mut Simulator, addr: u64| {
+            sim.set_input(0, &crate::logic::bits_from_u64(addr, 4));
+            sim.settle(100).unwrap();
+            crate::logic::bits_to_u64(&sim.read("word").unwrap())
+        };
+        // Address 0 jumps to `main`, right after the 6 squares.
+        assert_eq!(read(&mut sim, 0), Some(7));
+        assert_eq!(read(&mut sim, 4), Some(9));
+        sim.tick(100).unwrap();
+        assert_eq!(read(&mut sim, 6), Some(25), "ticks don't change a Rom");
+        assert_eq!(read(&mut sim, 15), Some(0), "past the end of the program");
+        // A jump to main, 6 squares, and main's `halt`.
+        assert_eq!(sim.netlist().rams[0].rom.as_ref().map(|w| w.len()), Some(8));
     }
 }

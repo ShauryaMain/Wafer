@@ -26,7 +26,7 @@ fn example_project(name: &str) -> PathBuf {
     let chips = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../chips");
     for entry in std::fs::read_dir(chips).unwrap() {
         let path = entry.unwrap().path();
-        if path.extension().is_some_and(|e| e == "chip") {
+        if path.extension().is_some_and(|e| e == "chip" || e == "asm" || e == "hex") {
             std::fs::copy(&path, dir.join(path.file_name().unwrap())).unwrap();
         }
     }
@@ -569,4 +569,27 @@ fn counts_with_the_clock() {
     assert!((20..=30).contains(&counted), "counted to {counted}");
     let ticks = h.state().state.sim.trace.as_ref().unwrap().ticks.len();
     assert!(ticks >= 20, "the timeline saw {ticks} ticks");
+}
+
+#[test]
+fn shows_a_roms_program() {
+    let dir = example_project("rom");
+    let mut h = open(&dir);
+    h.state_mut().state.open_chip("Squares");
+    h.run_steps(3);
+    let rom = node_center(&mut h, "square");
+    click(&mut h, rom);
+    h.run_steps(3);
+    // 18 words: the jump to main, 16 squares, and main's halt.
+    let _ = h.get_by_label("squares.asm: 18 of 32 words (read-only)");
+    let _ = h.get_by_label("0000  0011  jump main");
+    let _ = h.get_by_label("0004  0009  data 0x0009");
+    shot(&mut h, "rom_program");
+
+    // Editing the program reloads the Rom.
+    let path = dir.join("squares.asm");
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, text.replace("225", "225 0xBEEF")).unwrap();
+    wait_for_reload(&mut h);
+    let _ = h.get_by_label("squares.asm: 19 of 32 words (read-only)");
 }

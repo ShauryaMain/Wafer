@@ -20,7 +20,13 @@ pub enum GateKind {
     /// Memory: reads `addr` any time, writes `data` there on a tick when
     /// `write` is 1.
     Ram,
+    /// Read-only memory holding a program: `Rom(addr, file: "pong.asm")`.
+    /// Its words are [`ROM_WIDTH`] bits.
+    Rom,
 }
+
+/// How many bits each word of a `Rom` has: Crumb's word size.
+pub const ROM_WIDTH: usize = 16;
 
 /// How wide a built-in's port is compared to the part itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,12 +35,12 @@ pub enum PortWidth {
     Bus,
     /// Always one bit, like `sel` or `write`.
     Bit,
-    /// A `Ram`'s address width.
+    /// A `Ram`'s or `Rom`'s address width.
     Address,
 }
 
 impl GateKind {
-    pub const ALL: [GateKind; 11] = [
+    pub const ALL: [GateKind; 12] = [
         GateKind::Nand,
         GateKind::And,
         GateKind::Or,
@@ -46,6 +52,7 @@ impl GateKind {
         GateKind::TriBuf,
         GateKind::Dff,
         GateKind::Ram,
+        GateKind::Rom,
     ];
 
     pub fn name(self) -> &'static str {
@@ -61,6 +68,7 @@ impl GateKind {
             GateKind::TriBuf => "TriBuf",
             GateKind::Dff => "Dff",
             GateKind::Ram => "Ram",
+            GateKind::Rom => "Rom",
         }
     }
 
@@ -76,14 +84,24 @@ impl GateKind {
             GateKind::TriBuf => &["a", "en"],
             GateKind::Dff => &["d"],
             GateKind::Ram => &["addr", "data", "write"],
+            GateKind::Rom => &["addr"],
             _ => &["a", "b"],
+        }
+    }
+
+    /// Settings written as text rather than wired, like a `Rom`'s
+    /// `file: "pong.asm"`.
+    pub fn params(self) -> &'static [&'static str] {
+        match self {
+            GateKind::Rom => &["file"],
+            _ => &[],
         }
     }
 
     pub fn port_width(self, port: usize) -> PortWidth {
         match (self, port) {
             (GateKind::Mux, 2) | (GateKind::TriBuf, 1) | (GateKind::Ram, 2) => PortWidth::Bit,
-            (GateKind::Ram, 0) => PortWidth::Address,
+            (GateKind::Ram | GateKind::Rom, 0) => PortWidth::Address,
             _ => PortWidth::Bus,
         }
     }
@@ -91,6 +109,28 @@ impl GateKind {
     /// Parts that remember things between clock ticks.
     pub fn is_sequential(self) -> bool {
         matches!(self, GateKind::Dff | GateKind::Ram)
+    }
+
+    /// Memories, which have an address input.
+    pub fn has_address(self) -> bool {
+        matches!(self, GateKind::Ram | GateKind::Rom)
+    }
+
+    /// Parts drawn as a labeled box instead of a gate symbol.
+    pub fn is_box(self) -> bool {
+        matches!(self, GateKind::Dff | GateKind::Ram | GateKind::Rom)
+    }
+
+    /// A width that doesn't come from the inputs.
+    pub fn fixed_width(self) -> Option<usize> {
+        (self == GateKind::Rom).then_some(ROM_WIDTH)
+    }
+
+    /// Its arguments as written, like `a, b, sel` or `addr, file: "…"`.
+    pub fn args(self) -> String {
+        let params = self.params().iter().map(|p| format!("{p}: \"…\""));
+        let args: Vec<String> = self.inputs().iter().map(|s| s.to_string()).chain(params).collect();
+        args.join(", ")
     }
 
     /// One line for menus and hints.
@@ -107,6 +147,7 @@ impl GateKind {
             GateKind::TriBuf => "a when en is 1, otherwise disconnected (Z)",
             GateKind::Dff => "remembers d at every clock tick",
             GateKind::Ram => "memory: reads addr, writes data on a tick when write is 1",
+            GateKind::Rom => "read-only memory holding a program from a file",
         }
     }
 
@@ -135,7 +176,7 @@ impl GateKind {
                 Logic::Zero => Logic::Z,
                 _ => Logic::X,
             },
-            GateKind::Dff | GateKind::Ram => Logic::X,
+            GateKind::Dff | GateKind::Ram | GateKind::Rom => Logic::X,
         }
     }
 }

@@ -93,6 +93,8 @@ pub enum ExprKind {
         select: Option<Select>,
     },
     Literal(Literal),
+    /// `"pong.asm"`: only a `Rom`'s `file:` takes text.
+    Str(String),
     /// `{hi, lo}`: parts are listed most significant first.
     Concat(Vec<Expr>),
 }

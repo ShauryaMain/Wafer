@@ -149,8 +149,8 @@ pub fn render(
                     &port_label(name, *width),
                 );
             }
-            NodeKind::Gate { name, kind, label } if kind.is_sequential() => {
-                block(&mut out, theme, node, label, name, true);
+            NodeKind::Gate { name, kind, label } if kind.is_box() => {
+                block(&mut out, theme, node, label, name, kind.is_sequential());
             }
             NodeKind::Gate { name, kind, .. } => {
                 gate(&mut out, theme, *kind, x, y);
@@ -297,7 +297,9 @@ fn gate(out: &mut String, theme: &Theme, kind: GateKind, x: f32, y: f32) {
             ("M6,0 Q19,25 6,50 Q38,50 56,25 Q38,0 6,0 Z", Some("M0,0 Q13,25 0,50"), 11.5, 56.0)
         }
         GateKind::Not => ("M4,7 L50,25 L4,43 Z", None, 4.0, 50.0),
-        GateKind::Mux | GateKind::TriBuf | GateKind::Dff | GateKind::Ram => unreachable!("drawn separately"),
+        GateKind::Mux | GateKind::TriBuf | GateKind::Dff | GateKind::Ram | GateKind::Rom => {
+            unreachable!("drawn separately")
+        }
     };
     let bubble = matches!(kind, GateKind::Nand | GateKind::Nor | GateKind::Xnor | GateKind::Not);
     let _ = writeln!(out, r#"<g transform="translate({x:.1},{y:.1})" stroke="{stroke}" stroke-width="2" fill="none">"#);

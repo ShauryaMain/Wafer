@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+
+mod crumb_cmd;
 use wafer_core::diag::{display_path, suggest};
 use wafer_core::layout_file::LayoutFile;
 use wafer_core::logic::{Logic, bits_from_u64, format_bits};
@@ -58,6 +60,35 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+    /// Assemble a Crumb program (.asm) and report how big it is
+    Asm {
+        file: PathBuf,
+        /// Print every word: its address, machine code, instruction and source
+        #[arg(long)]
+        list: bool,
+        /// Also save the words as a .hex file a Rom can load
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Run a Crumb program (.asm or .hex) on the reference CPU
+    Run {
+        file: PathBuf,
+        /// Stop after this many instructions (default: when it halts, or after 10 million)
+        #[arg(long)]
+        steps: Option<u64>,
+        /// Run this many frames instead
+        #[arg(long, conflicts_with = "steps")]
+        frames: Option<u64>,
+        /// Buttons to hold down the whole time, like `--pad up,a` or `--pad 0x11`
+        #[arg(long)]
+        pad: Option<String>,
+        /// Print the screen as text
+        #[arg(long)]
+        screen: bool,
+        /// Save the screen as a PNG
+        #[arg(long, value_name = "FILE")]
+        png: Option<PathBuf>,
+    },
 }
 
 struct Ui {
@@ -82,6 +113,15 @@ impl Ui {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let ui = Ui { color: std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none() };
+    // Programs stand alone: they don't need the project.
+    match cli.command {
+        Command::Asm { file, list, output } => return crumb_cmd::asm(&file, list, output.as_deref(), &ui),
+        Command::Run { file, steps, frames, pad, screen, png } => {
+            let options = crumb_cmd::RunOptions { steps, frames, pad, screen, png };
+            return crumb_cmd::run(&file, &options, &ui);
+        }
+        _ => {}
+    }
     let project = match Project::load(&cli.project) {
         Ok(project) => project,
         Err(e) => {
@@ -107,6 +147,7 @@ fn main() -> ExitCode {
         Command::Test { chips } => test(&project, &design, &chips, errors, &ui),
         Command::Sim { chip, set, all } => sim(&design, &chip, &set, all, &ui),
         Command::Render { chip, set, output } => render(&project, &design, &chip, &set, output, &ui),
+        Command::Asm { .. } | Command::Run { .. } => unreachable!("handled above"),
     }
 }
 

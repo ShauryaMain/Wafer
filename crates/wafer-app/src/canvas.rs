@@ -967,8 +967,8 @@ impl Canvas {
                         theme::TEXT,
                     );
                 }
-                NodeKind::Gate { name, kind, label } if kind.is_sequential() => {
-                    self.block(painter, node, at, size, label, name, true);
+                NodeKind::Gate { name, kind, label } if kind.is_box() => {
+                    self.block(painter, node, at, size, label, name, kind.is_sequential());
                 }
                 NodeKind::Gate { name, kind, .. } => {
                     self.gate(painter, *kind, at);

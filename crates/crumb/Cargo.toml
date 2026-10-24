@@ -1,0 +1,7 @@
+[package]
+name = "crumb"
+description = "Crumb, our 16-bit game console CPU: its assembler and a fast reference model"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

@@ -9,6 +9,7 @@ name = "wafer"
 path = "src/main.rs"
 
 [dependencies]
+crumb = { path = "../crumb" }
 clap = { version = "4.6.7", features = ["derive"] }
 resvg = "0.48.1"
 wafer-core = { path = "../wafer-core" }

@@ -156,7 +156,7 @@ pub struct BuiltinMismatch {
 /// Returns `None` if the chip isn't named after a built-in gate or doesn't
 /// have the same shape (same number of 1-bit inputs, one 1-bit output).
 pub fn check_against_builtin(design: &Design, chip: &str) -> Option<BuiltinCheck> {
-    let gate = GateKind::from_name(chip).filter(|g| !g.is_sequential())?;
+    let gate = GateKind::from_name(chip).filter(|g| !g.is_box())?;
     let info = design.chips.get(chip)?;
     let n = gate.inputs().len();
     let same_shape = info.inputs.len() == n

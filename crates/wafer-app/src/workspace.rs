@@ -138,7 +138,7 @@ impl Workspace {
         }
 
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for (id, _) in &project.files {
+        for id in project.files.iter().map(|(id, _)| id).chain(&project.programs) {
             project.sources.get(*id).text.hash(&mut hasher);
         }
         let text_hash = hasher.finish();
@@ -422,7 +422,10 @@ fn scan(dir: &Path) -> Vec<(PathBuf, SystemTime, u64)> {
             }
             if path.is_dir() {
                 stack.push(path);
-            } else if (name.ends_with(".chip") || name.ends_with(".layout.json"))
+            } else if (name.ends_with(".chip")
+                || name.ends_with(".layout.json")
+                || name.ends_with(".asm")
+                || name.ends_with(".hex"))
                 && let Ok(meta) = entry.metadata()
             {
                 out.push((path, meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len()));

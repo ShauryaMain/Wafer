@@ -298,6 +298,10 @@ impl Parser<'_> {
                 self.bump();
                 Ok(Expr { kind: ExprKind::Literal(Literal { value, digits_width }), span: start })
             }
+            Tok::Str(text) => {
+                self.bump();
+                Ok(Expr { kind: ExprKind::Str(text), span: start })
+            }
             Tok::LBrace => {
                 self.bump();
                 let mut parts = Vec::new();

@@ -1,0 +1,18 @@
+// Squares a 4-bit number by looking it up in a Rom. The table is in
+// squares.asm, one address in (address 0 is the program's jump to `main`),
+// so the Rom reads address n + 1.
+chip Squares {
+  in  n[4]
+  out square[16]
+
+  next   = Add4(n, 1, 0)
+  square = Rom({next.cout, next.sum}, file: "squares.asm")
+}
+
+test Squares {
+  // n | square
+     0 | 0
+     3 | 9
+     7 | 49
+    15 | 225
+}

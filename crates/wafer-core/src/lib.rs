@@ -2,7 +2,8 @@
 //! `wafer` command share exactly the same behavior.
 //!
 //! The pipeline:
-//! 1. [`Project::load`] reads and parses every `.chip` file in a folder.
+//! 1. [`Project::load`] reads and parses every `.chip` file in a folder, plus
+//!    the programs (`.asm`, `.hex`) its `Rom`s load.
 //! 2. [`Design::check`] resolves names and bus widths and reports mistakes.
 //! 3. [`Netlist::build`] flattens one chip into individual bit-level gates.
 //! 4. [`Simulator`] runs that netlist with one time step per gate.
@@ -25,6 +26,7 @@ pub mod lexer;
 pub mod logic;
 pub mod netlist;
 pub mod parser;
+pub mod program;
 pub mod project;
 pub mod schematic;
 pub mod sim;

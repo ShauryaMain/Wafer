@@ -1,17 +1,22 @@
 //! Checks chips for mistakes and works out how wide every signal is.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::ast::{self, Expr, ExprKind, Select, StmtValue, TestValueKind};
 use crate::diag::{Diagnostic, Span, suggest};
 use crate::gate::{GateKind, PortWidth};
 use crate::logic::{Logic, bits_from_u64};
+use crate::program::{self, RomProgram};
 use crate::project::Project;
 
 /// Everything Wafer knows about a project after checking it.
 pub struct Design {
     pub chips: BTreeMap<String, ChipInfo>,
     pub tests: Vec<TestInfo>,
+    /// Programs loaded by `Rom`s, by path.
+    pub programs: BTreeMap<PathBuf, Arc<RomProgram>>,
     /// Mistakes found while checking (syntax errors live on the [`Project`]).
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -63,6 +68,18 @@ pub struct Instance {
     pub shared: bool,
     /// Which statement in the chip it comes from.
     pub line: usize,
+    pub span: Span,
+    /// A `Rom`'s `file: "pong.asm"`.
+    pub program: Option<ProgramRef>,
+}
+
+/// The program a `Rom` line names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProgramRef {
+    /// As written, like `pong.asm`.
+    pub name: String,
+    /// Resolved next to the chip's file.
+    pub path: PathBuf,
     pub span: Span,
 }
 
@@ -150,10 +167,18 @@ impl Design {
                 (name.clone(), Signature { inputs: ports(&info.inputs), outputs: ports(&info.outputs) })
             })
             .collect();
+        let mut programs = BTreeMap::new();
         for (name, def) in &defs {
             let info = chips.remove(name).expect("declared above");
             let errors_before = count_errors(&diags);
-            let mut checker = BodyCheck { wire_widths: Vec::new(), info, sigs: &sigs, diags: &mut diags };
+            let mut checker = BodyCheck {
+                wire_widths: Vec::new(),
+                info,
+                sigs: &sigs,
+                diags: &mut diags,
+                project,
+                programs: &mut programs,
+            };
             checker.check(def);
             let mut info = checker.info;
             info.has_errors |= count_errors(&diags) > errors_before;
@@ -162,7 +187,8 @@ impl Design {
         find_recursion(&mut chips, &mut diags);
 
         let tests = project.tests().filter_map(|def| check_test(def, &chips, &mut diags)).collect();
-        Design { chips, tests, diagnostics: diags }
+        let programs = programs.into_iter().filter_map(|(path, p)| Some((path, p?))).collect();
+        Design { chips, tests, programs, diagnostics: diags }
     }
 
     pub fn has_errors(&self) -> bool {
@@ -278,6 +304,9 @@ struct BodyCheck<'a> {
     info: ChipInfo,
     sigs: &'a HashMap<String, Signature>,
     diags: &'a mut Vec<Diagnostic>,
+    project: &'a Project,
+    /// Every program loaded so far; `None` if it has errors.
+    programs: &'a mut BTreeMap<PathBuf, Option<Arc<RomProgram>>>,
     /// `None` while a wire's width is still being worked out.
     wire_widths: Vec<Option<usize>>,
 }
@@ -298,6 +327,50 @@ impl BodyCheck<'_> {
         }
         self.infer_widths();
         self.validate();
+        for i in 0..self.info.instances.len() {
+            if let Some(program) = self.info.instances[i].program.clone() {
+                self.load_program(i, &program);
+            }
+        }
+    }
+
+    /// Loads (once) the program a `Rom` names, and checks that it fits.
+    fn load_program(&mut self, index: usize, program: &ProgramRef) {
+        let Some(file) = self.project.program(&program.path) else {
+            self.error(
+                Diagnostic::error(program.span, format!("can't find `{}`", program.name))
+                    .note(format!("looked for {}", crate::diag::display_path(&program.path))),
+            );
+            return;
+        };
+        if !self.programs.contains_key(&program.path) {
+            let loaded = match program::load(&self.project.sources, file) {
+                Ok(loaded) => Some(Arc::new(loaded)),
+                Err(errors) => {
+                    self.diags.extend(errors);
+                    None
+                }
+            };
+            self.programs.insert(program.path.clone(), loaded);
+        }
+        let Some(loaded) = self.programs[&program.path].clone() else {
+            self.error(Diagnostic::error(
+                program.span,
+                format!("`{}` has mistakes, so it can't be loaded", program.name),
+            ));
+            return;
+        };
+        let Callee::Gate { addr, .. } = self.info.instances[index].callee else { return };
+        let room = 1usize << addr.min(crate::sim::MAX_ADDRESS_BITS);
+        if loaded.words.len() > room {
+            self.error(
+                Diagnostic::error(
+                    program.span,
+                    format!("`{}` is {} words, which doesn't fit", program.name, loaded.words.len()),
+                )
+                .note(format!("a {addr}-bit address reaches {room} words")),
+            );
+        }
     }
 
     /// `data <- TriBuf(x, en)`: adds a driver to a shared wire. Drivers are
@@ -407,7 +480,8 @@ impl BodyCheck<'_> {
         let (callee, ports): (Callee, Vec<String>) = if let Some(sig) = self.sigs.get(chip) {
             (Callee::Chip(chip.clone()), sig.inputs.iter().map(|(n, _)| n.clone()).collect())
         } else if let Some(kind) = GateKind::from_name(chip) {
-            (Callee::Gate { kind, width: 0, addr: 0 }, kind.inputs().iter().map(|n| n.to_string()).collect())
+            let width = kind.fixed_width().unwrap_or(0);
+            (Callee::Gate { kind, width, addr: 0 }, kind.inputs().iter().map(|n| n.to_string()).collect())
         } else {
             let known = self.sigs.keys().map(String::as_str).chain(GateKind::ALL.iter().map(|g| g.name()));
             let mut d = Diagnostic::error(call.chip.span, format!("there's no chip named `{chip}`"));
@@ -423,12 +497,46 @@ impl BodyCheck<'_> {
                 shared: false,
                 line,
                 span,
+                program: None,
             };
         };
 
+        let params = match callee {
+            Callee::Gate { kind, .. } => kind.params(),
+            _ => &[],
+        };
+        let mut program = None;
         let mut slots: Vec<Option<Expr>> = vec![None; ports.len()];
         let mut named_seen = false;
-        for (position, arg) in call.args.iter().enumerate() {
+        let mut position = 0;
+        for arg in &call.args {
+            if let ExprKind::Str(text) = &arg.value.kind {
+                let named = arg.name.as_ref().map(|n| n.name.as_str());
+                if params.is_empty() {
+                    self.error(
+                        Diagnostic::error(arg.value.span, format!("`{chip}` doesn't take text"))
+                            .note("only a `Rom` does, for its program: `Rom(addr, file: \"pong.asm\")`"),
+                    );
+                } else if named.is_some_and(|n| !params.contains(&n)) {
+                    let port = arg.name.as_ref().expect("named");
+                    self.error(
+                        Diagnostic::error(port.span, format!("`{chip}` has no setting `{}`", port.name))
+                            .note(format!("did you mean `{}: \"{text}\"`?", params[0])),
+                    );
+                } else if program.is_some() {
+                    self.error(Diagnostic::error(arg.value.span, format!("`{chip}` already has a {}", params[0])));
+                } else {
+                    let chip_file = &self.project.sources.get(arg.value.span.file).path;
+                    program = Some(ProgramRef {
+                        name: text.clone(),
+                        path: program::resolve(chip_file, text),
+                        span: arg.value.span,
+                    });
+                }
+                continue;
+            }
+            let this = position;
+            position += 1;
             let slot = match &arg.name {
                 Some(port) => {
                     named_seen = true;
@@ -449,7 +557,7 @@ impl BodyCheck<'_> {
                     self.error(Diagnostic::error(arg.value.span, "unnamed inputs have to come before named ones"));
                     continue;
                 }
-                None if position >= ports.len() => {
+                None if this >= ports.len() => {
                     self.error(
                         Diagnostic::error(
                             arg.value.span,
@@ -459,7 +567,7 @@ impl BodyCheck<'_> {
                     );
                     continue;
                 }
-                None => position,
+                None => this,
             };
             if slots[slot].is_some() {
                 self.error(Diagnostic::error(arg.value.span, format!("input `{}` is connected twice", ports[slot])));
@@ -476,7 +584,12 @@ impl BodyCheck<'_> {
                     .note("unconnected inputs read as Z"),
             );
         }
-        Instance { name: name.into(), callee, inputs: slots, drives, shared: false, line, span }
+        if !params.is_empty() && program.is_none() {
+            self.error(Diagnostic::error(call.span, format!("`{name}` needs a program to hold")).note(format!(
+                "like `{name} = {chip}(addr, file: \"pong.asm\")`, with the .asm or .hex file next to this chip"
+            )));
+        }
+        Instance { name: name.into(), callee, inputs: slots, drives, shared: false, line, span, program }
     }
 
     /// Output ports of the box at `index` and their widths (`None` while a
@@ -506,6 +619,7 @@ impl BodyCheck<'_> {
     fn quiet_width(&self, expr: &Expr, literals: bool) -> Option<usize> {
         match &expr.kind {
             ExprKind::Literal(lit) => literals.then(|| lit.natural_width()),
+            ExprKind::Str(_) => None,
             ExprKind::Concat(parts) => parts.iter().map(|p| self.quiet_width(p, true)).sum(),
             ExprKind::Ref { base, port, select } => {
                 let name = *self.info.names.get(&base.name)?;
@@ -540,7 +654,7 @@ impl BodyCheck<'_> {
                 };
                 let new_width = if width == 0 { from(PortWidth::Bus).unwrap_or(0) } else { width };
                 let new_addr =
-                    if kind == GateKind::Ram && addr == 0 { from(PortWidth::Address).unwrap_or(0) } else { addr };
+                    if kind.has_address() && addr == 0 { from(PortWidth::Address).unwrap_or(0) } else { addr };
                 if (new_width, new_addr) != (width, addr) {
                     self.info.instances[i].callee = Callee::Gate { kind, width: new_width, addr: new_addr };
                     changed = true;
@@ -588,7 +702,7 @@ impl BodyCheck<'_> {
                     1
                 });
             }
-            if kind == GateKind::Ram && addr == 0 {
+            if kind.has_address() && addr == 0 {
                 new_addr = guess(PortWidth::Address).unwrap_or_else(|()| {
                     unknown = true;
                     1
@@ -633,6 +747,13 @@ impl BodyCheck<'_> {
                     total = total.zip(width).map(|(a, b)| a + b);
                 }
                 total
+            }
+            ExprKind::Str(_) => {
+                self.error(
+                    Diagnostic::error(expr.span, "text in quotes isn't a signal")
+                        .note("only a `Rom`'s `file:` takes text, like `Rom(addr, file: \"pong.asm\")`"),
+                );
+                None
             }
             ExprKind::Ref { base, port, select } => {
                 let Some(&name) = self.info.names.get(&base.name) else {
@@ -1237,5 +1358,38 @@ mod tests {
     fn undriven_outputs_are_reported() {
         let (_, messages) = check("chip A {\n in a\n out y[4]\n y[1:0] = {a, a}\n}");
         assert!(messages.iter().any(|m| m == "bits 3..2 of output `y` are never driven"), "{messages:?}");
+    }
+
+    fn check_with(chip: &str, others: &[(&str, &str)]) -> Vec<String> {
+        let mut sources = vec![("chips/test.chip".into(), chip.to_string())];
+        sources.extend(others.iter().map(|(p, t)| (p.into(), t.to_string())));
+        let project = Project::from_sources(sources);
+        assert!(project.diagnostics.is_empty(), "{:#?}", project.diagnostics);
+        Design::check(&project).diagnostics.iter().map(|d| d.message.clone()).collect()
+    }
+
+    #[test]
+    fn roms_load_programs_next_to_the_chip() {
+        let chip = "chip R {\n in a[4]\n out y[16]\n y = Rom(a, file: \"p.hex\")\n}";
+        assert_eq!(check_with(chip, &[("chips/p.hex", "1 2 3")]), Vec::<String>::new());
+        assert_eq!(check_with(chip, &[("elsewhere/p.hex", "1")]), ["can't find `p.hex`"]);
+        let chip = "chip R {\n in a[4]\n out y[16]\n y = Rom(a, file: \"../games/p.asm\")\n}";
+        assert_eq!(check_with(chip, &[("games/p.asm", ": main halt ;")]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn rom_mistakes() {
+        let rom = |line: &str| format!("chip R {{\n in a[2]\n out y[16]\n {line}\n}}");
+        let program = [("chips/p.hex", "1 2 3 4 5")];
+        assert_eq!(check_with(&rom("y = Rom(a)"), &program), ["`y` needs a program to hold"]);
+        assert_eq!(check_with(&rom("y = Rom(a, name: \"p.hex\")"), &program)[0], "`Rom` has no setting `name`");
+        assert_eq!(
+            check_with(&rom("y = Rom(a, file: \"p.hex\")"), &program),
+            ["`p.hex` is 5 words, which doesn't fit"]
+        );
+        let messages = check_with(&rom("y = Rom(a, file: \"bad.asm\")"), &[("chips/bad.asm", ": main oops ;")]);
+        assert_eq!(messages, ["there's no word named `oops`", "`bad.asm` has mistakes, so it can't be loaded"]);
+        assert_eq!(check_with(&rom("y = Xor(a, \"p.hex\")"), &program)[0], "`Xor` doesn't take text");
+        assert_eq!(check_with(&rom("y = \"hello\""), &program)[0], "text in quotes isn't a signal");
     }
 }

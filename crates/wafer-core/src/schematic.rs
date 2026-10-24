@@ -218,10 +218,14 @@ impl<'a> Graph<'a> {
                 Callee::Gate { kind, width, addr } => {
                     let label = match kind {
                         GateKind::Ram => format!("Ram {}×{width}", 1u64 << (*addr).min(63)),
+                        GateKind::Rom => match &inst.program {
+                            Some(program) => format!("Rom {}", program.name),
+                            None => "Rom".into(),
+                        },
                         GateKind::Dff if *width > 1 => format!("Dff ×{width}"),
                         _ => kind.name().to_string(),
                     };
-                    let geom = if kind.is_sequential() {
+                    let geom = if kind.is_box() {
                         chip_geom(&label, &design.signature(&inst.callee))
                     } else {
                         gate_geom(*kind)
@@ -1032,6 +1036,7 @@ impl Resolver<'_> {
             ExprKind::Literal(_) => {
                 vec![Part { source: None, constant: Some(self.sources.slice(expr.span).to_string()), label: None }]
             }
+            ExprKind::Str(_) => Vec::new(),
             ExprKind::Concat(parts) => parts.iter().flat_map(|p| self.resolve(p, depth)).collect(),
             ExprKind::Ref { base, port, select } => {
                 let mut parts = match self.info.names.get(&base.name) {

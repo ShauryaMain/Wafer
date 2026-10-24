@@ -8,6 +8,11 @@ Phases 1 and 2 are done: the engine, `wafer` command and desktop app with
 its canvas, timeline, code panel and chips inside chips; then clocks,
 flip-flops, memory and shared buses, up to an 8-bit counter.
 
+Phase 3 is building **Crumb**, our 16-bit game console CPU. Its spec is
+[docs/crumb.md](docs/crumb.md). So far (milestone 3a): the instruction set,
+a Forth-style assembler, a fast reference Crumb that runs programs, and
+`Rom`s that load assembled programs.
+
 ## The app
 
 You need Rust (`rustup`). From this folder:
@@ -68,6 +73,22 @@ cargo wafer -p chips render Add4 --set a=0x9,b=0x9,cin=1
 `fmt` formats every `.chip` file (`--check` only reports).
 `cargo wafer --help` lists every command.
 
+Crumb programs run on the reference CPU straight from their `.asm` file:
+
+```bash
+cargo wafer run chips/hello.asm
+```
+
+```bash
+cargo wafer run chips/bounce.asm --frames 60 --screen --png renders/bounce.png
+```
+
+`run` stops when the program halts (or use `--steps` / `--frames`), then
+shows the console, number display, LEDs and stack. `--pad up,a` holds
+buttons down. `cargo wafer asm chips/bounce.asm --list` prints every word
+with its address, instruction and source, and `-o bounce.hex` saves the
+machine code.
+
 ## Writing chips
 
 Each `.chip` file holds chips and their tests. One line is one box on the
@@ -91,9 +112,14 @@ test HalfAdder {
 
 The built-in parts are the gates Nand, And, Or, Not, Xor, Nor and Xnor,
 plus `Mux(a, b, sel)`, `TriBuf(a, en)`, `Dff(d)` (flip-flops, which change
-only on a clock tick) and `Ram(addr, data, write)`. If you write a chip with
-the same name as a built-in (like `chips/Xor.chip`), yours replaces it across
-the project, and `wafer test` checks that the two agree.
+only on a clock tick), `Ram(addr, data, write)` and
+`Rom(addr, file: "pong.asm")`. A Rom holds 16-bit words from a program next
+to the chip: a Crumb `.asm` file (assembled when it loads, and again when it
+changes) or a `.hex` file of words.
+
+If you write a chip with the same name as a built-in (like `chips/Xor.chip`),
+yours replaces it across the project, and `wafer test` checks that the two
+agree.
 
 Several drivers can share a bus with `bus <- TriBuf(x, en)` lines. Tests can
 be truth tables or steps:
@@ -112,11 +138,30 @@ test Counter8 {
 Buses look like `in a[8]`, with `a[0]` for the lowest bit, `a[7:4]` for a
 slice, and `{hi, lo}` to join buses. PLANNING.md has the full format.
 
+## Writing Crumb programs
+
+Crumb assembly is Forth-style: words run left to right on a stack.
+[docs/crumb.md](docs/crumb.md) has the whole language.
+
+```
+var paddle_y
+
+: move_paddle  ( -- )
+  PAD @ BTN_UP and if
+    paddle_y @ 1 - paddle_y !
+  then ;
+
+: main
+  begin move_paddle again ;
+```
+
 ## Layout
 
 | Path | What's there |
 |---|---|
 | `crates/wafer-core` | The engine: parser, checker, netlist, simulator, test runner, schematic layout and SVG drawing. No UI code. |
+| `crates/crumb` | Crumb: its instruction encoding, the assembler, and the reference CPU |
 | `crates/wafer-cli` | The `wafer` command |
 | `crates/wafer-app` | The desktop app: canvas, panels, live simulation. UI tests in `tests/ui.rs` drive it with simulated input. |
-| `chips/` | Our chips: gates built from Nand, adders, a latch, a register, an 8-bit counter, a shared bus and some memory |
+| `chips/` | Our chips: gates built from Nand, adders, a latch, a register, an 8-bit counter, a shared bus, some memory and a Rom lookup table. Also Crumb programs: `hello.asm`, `count.asm`, `bounce.asm` |
+| `docs/crumb.md` | The Crumb spec: memory map, instructions, timing, the assembler language |

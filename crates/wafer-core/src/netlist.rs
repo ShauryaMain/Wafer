@@ -2,6 +2,7 @@
 //! by numbered nets. This is what the simulator runs.
 
 use std::fmt;
+use std::sync::Arc;
 
 use crate::ast::{Expr, ExprKind};
 use crate::check::{Callee, ChipInfo, Design, Name};
@@ -35,9 +36,13 @@ pub struct RamBlock {
     /// Where it is, like `cpu.ram`.
     pub path: String,
     pub addr: Vec<NetId>,
+    /// Its width comes from here. A Rom's are nets nothing drives.
     pub data: Vec<NetId>,
+    /// A Rom's is a constant 0.
     pub write: NetId,
     pub out: Vec<NetId>,
+    /// For a Rom: the words it starts with (and keeps, since nothing writes).
+    pub rom: Option<Arc<Vec<u64>>>,
 }
 
 /// A shared wire bit with several drivers (`data <- TriBuf(...)` lines).
@@ -158,6 +163,7 @@ impl Netlist {
                     data: r.data.iter().map(|&n| map(n)).collect(),
                     write: map(r.write),
                     out: r.out.iter().map(|&n| map(n)).collect(),
+                    rom: r.rom.clone(),
                 })
                 .collect(),
             wired: b
@@ -346,7 +352,23 @@ impl Builder<'_> {
                     data: args[1].clone(),
                     write: args[2][0],
                     out: out[0].clone(),
+                    rom: None,
                 }),
+                Callee::Gate { kind: GateKind::Rom, width, .. } => {
+                    let words =
+                        inst.program.as_ref().and_then(|p| design.programs.get(&p.path)).map(|p| p.words.clone());
+                    let write = self.fresh(1)[0];
+                    self.constants.push((write, Logic::Zero));
+                    let data = self.fresh(*width);
+                    self.rams.push(RamBlock {
+                        path: format!("{prefix}{}", inst.name),
+                        addr: args[0].clone(),
+                        data,
+                        write,
+                        out: out[0].clone(),
+                        rom: Some(words.unwrap_or_default()),
+                    });
+                }
                 Callee::Gate { kind, width, .. } => {
                     for bit in 0..*width {
                         // One-bit inputs like `sel` feed every bit.
@@ -427,6 +449,8 @@ impl Builder<'_> {
                     })
                     .collect()
             }
+            // The checker rejects text anywhere but a Rom's `file:`.
+            ExprKind::Str(_) => self.fresh(width.unwrap_or(1)),
             ExprKind::Concat(parts) => {
                 let mut nets = Vec::new();
                 for part in parts.iter().rev() {

@@ -185,14 +185,14 @@ pub fn signature(design: &Design, callee: &str) -> Option<String> {
         return Some(format!("{callee}({}) → {}", ports(&sig.inputs), ports(&sig.outputs)));
     }
     let gate = GateKind::from_name(callee)?;
-    Some(format!("{callee}({}) → out", gate.inputs().join(", ")))
+    Some(format!("{callee}({}) → out", gate.args()))
 }
 
 fn callees(design: &Design, current: &str) -> Vec<Suggestion> {
     let mut out = Vec::new();
     for gate in GateKind::ALL {
         if !design.chips.contains_key(gate.name()) {
-            let detail = format!("gate · {} → out", gate.inputs().join(", "));
+            let detail = format!("gate · {} → out", gate.args());
             out.push(Suggestion {
                 label: gate.name().into(),
                 insert: format!("{}()", gate.name()),

@@ -1,6 +1,6 @@
 # Wafer: Planning
 
-**Wafer** is our chip design software. The chip we'll build with it is unnamed until Phase 3.
+**Wafer** is our chip design software. The first chip we're building with it is **Crumb**, a 16-bit CPU for a tiny game console.
 
 This is our shared planning doc. Either of us can edit it. A decision moves from **Proposed** to **Decided** once we both agree.
 
@@ -18,7 +18,7 @@ The end goal is to design our own chip with Wafer, and possibly run it on real h
 |---|---|
 | Platform | Native desktop app |
 | Design style | Visual gates and wires on a canvas, with a readable text file underneath as the source of truth |
-| Target chip | Undecided. Keep the tool general; decide before Phase 3 |
+| Target chip | Undecided. Keep the tool general; decide before Phase 3 (now decided: **Crumb**, see Phase 3 rounds) |
 | Audience | Assumes the user knows gates and binary. The tool explains deeper hardware concepts (timing, clocks, synthesis) |
 
 ### Round 2 (2026-10-23)
@@ -44,8 +44,51 @@ The end goal is to design our own chip with Wafer, and possibly run it on real h
 | Wires | Right-angle. The app auto-routes, you can drag segments, and dots mark junctions |
 | Controls | Blender keys + mouse menus (keymap below). Trackpad-friendly navigation |
 | Look | Terminal green (palette below). A light theme toggle can come later |
-| Names | Software: **Wafer**. Chip: decide in Phase 3 |
+| Names | Software: **Wafer**. Chip: **Crumb** (decided in Phase 3) |
 | Shared buses | `wire data[8]` declares a shared wire, and `data <- TriBuf(x, en)` adds a driver. Two drivers on at once = X. Needed by Phase 2 |
+
+### Phase 3, round 1 (2026-10-24)
+
+| Topic | Decision |
+|---|---|
+| Goal | A simple CPU that runs games like Pong, Tetris and Space Invaders |
+| CPU | Our own **16-bit** design. (RISC-V RV32I was picked first, then swapped for 16 bits: enough for these games, and half the wiring) |
+| Style | Stack machine: instructions take their inputs from a stack and push results back |
+| Timing | Several clock ticks per instruction (multi-cycle), so each step is easy to watch |
+| Outputs | All four: number display, LEDs and switches, a tiny screen, a text console |
+
+### Phase 3, round 2 (2026-10-24)
+
+| Topic | Decision |
+|---|---|
+| Name | **Crumb** |
+| Screen | 128×64, 1 bit per pixel (black and white). Memory-mapped: 512 words, 8 words per row |
+| Controls | 8-button gamepad read as one word: up, down, left, right, A (Z key), B (X key), Start (Enter), Select (Shift) |
+| Instruction format | Packed, one 16-bit word per instruction, in the style of the J1 Forth CPU (draft below) |
+| Memory | Word-addressed: every address holds one 16-bit word, no bytes |
+| Game helpers | A frame counter and a random-number port |
+| First games | Pong first, then Tetris, then Space Invaders |
+
+### Phase 3, round 3 (2026-10-24)
+
+| Topic | Decision |
+|---|---|
+| Assembly | Forth-style words (example below). Words run left to right on the stack, and most words are one instruction. `if`/`else`/`then` and `begin`/`until` turn into jumps, `: name ... ;` defines a function, and `const`/`var` name numbers and RAM words |
+| Instruction set | Lives in Rust code (assembler and reference CPU), with a written spec in `docs/crumb.md`. The ALU instructions are bit fields, not a plain opcode list, so a table file would cost more than it saves |
+| Rom program | The chip names a default program: `rom = Rom(pc, file: "pong.asm")`. Wafer assembles it on load, and again whenever the `.asm` changes. The app also has a cartridge menu to swap games without editing the chip |
+| Frames | The frame counter goes up every N clock ticks. Every frame gets the same instruction budget, games behave the same at any speed, and tests can replay a game exactly. Turbo only changes how fast frames arrive in real time. N is picked after measuring Crumb in gates |
+| Milestones | 3a–3e as drafted below |
+
+```
+const PAD = 0x6000
+const UP  = 0b0001
+var paddle_y
+
+: move_paddle
+  PAD @ UP and if
+    paddle_y @ 1 - paddle_y !
+  then ;
+```
 
 ## Core principles
 
@@ -169,6 +212,7 @@ Rules:
 - **Tests live in the same file as the chip.** Use truth tables for plain logic, and `set` / `tick` / `expect` steps for anything with a clock.
 - **Canvas positions** go in `Name.layout.json` next to the chip, written by the app. A chip with no saved positions gets auto-laid-out.
 - **Canvas edits rewrite only the lines they change**, so comments and line order in a `.chip` file survive.
+- **Text in quotes** is only for settings that aren't wires: a Rom's `file: "pong.asm"`.
 - **No loops yet.** One line, one box. Revisit when writing out repeated lines gets painful.
 
 ## Simulation model
@@ -177,7 +221,7 @@ Rules:
   - X spreads through logic, for example `And(X, 1) = X` but `And(X, 0) = 0`.
   - Z is what a disconnected or switched-off driver outputs.
 - **Timing:** event-driven, one time step per gate. A clock tick runs until every signal settles, or is reported as oscillating.
-- **Built-in parts:** Nand, And, Or, Not, Xor, Nor, Xnor, the constants 0 and 1 (Phase 1); Dff (flip-flop), Ram, TriBuf and Mux (Phase 2); Rom (Phase 3).
+- **Built-in parts:** Nand, And, Or, Not, Xor, Nor, Xnor, the constants 0 and 1 (Phase 1); Dff (flip-flop), Ram, TriBuf and Mux (Phase 2); Rom (Phase 3, milestone 3a).
 
 ## Roadmap
 
@@ -243,7 +287,41 @@ Clock, flip-flops, registers, Ram/Rom, shared buses with tri-state drivers, `tic
 
 ### Phase 3: Computer
 
-Decide the target chip and its name. Instruction set, assembler, ROM loaded from assembled programs, CPU debugger (registers, program counter, memory view). *Milestone: our CPU runs a real program.*
+Build **Crumb**, a 16-bit stack CPU, plus the console around it: instruction set, assembler, ROM loaded from assembled programs, screen and gamepad, CPU debugger (registers, program counter, stacks, memory view). *Milestone: Crumb plays Pong.*
+
+#### Crumb
+
+The spec is [docs/crumb.md](docs/crumb.md): memory map, instruction encoding, the 16 ALU operations, timing, I/O ports and the assembler language. In short:
+
+- **Memory map**, by word address. The top 3 address bits pick the device, and every device sits below 0x8000, so a single 15-bit push reaches any address. ROM `0x0000–0x1FFF` (8K words), RAM `0x2000–0x3FFF` (8K), screen `0x4000–0x41FF` (512), I/O ports from `0x6000`.
+- **Instructions**, J1 style, one word each: push a 15-bit number, jump, jump if zero, call, or an ALU instruction whose fields pick the operation, the stack moves, a return, and a memory write. Jump targets are 13 bits, which is why the ROM is 8K words.
+- **Stacks:** a data stack and a return stack, 32 deep each, with the top of the data stack (`T`) in a register.
+
+#### Milestones (Decided)
+
+- **3a, ISA and tools. ✅ Done 2026-10-24.** Write the Crumb instruction spec (`docs/crumb.md`), the Forth-style assembler (`wafer asm`), a `Rom` built-in that loads assembled programs (this needs string arguments like `file: "pong.asm"` in the `.chip` language), and a fast reference Crumb written in Rust. The reference CPU lets us write and test games at full speed while the gates are being built, and later checks the gate-level CPU instruction by instruction.
+  - Built:
+    - A new `crates/crumb`: the instruction encoding and disassembler, the assembler, and the reference Crumb (the whole console: CPU, memory, screen and ports, tick for tick).
+    - `wafer asm file.asm` (`--list` for a listing, `-o` for a `.hex` file) and `wafer run file.asm` (`--steps`, `--frames`, `--pad up,a`, `--screen` to print the screen, `--png` to save it).
+    - `Rom(addr, file: "pong.asm")` in chips. It loads `.asm` (assembled on the spot) or `.hex` files from next to the chip, reloads when they change, and assembler mistakes show up in Problems pointing into the `.asm` file. Rewiring a Rom on the canvas keeps its `file:`.
+    - The Inspector lists a selected Rom's program, disassembled, with the word it's reading highlighted.
+    - Examples: `hello.asm` (console), `count.asm` (number display and LEDs, once per frame), `bounce.asm` (a ball bouncing inside a border: the first step towards Pong), and `Squares.chip`, a Rom used as a lookup table.
+  - Decided along the way:
+    - **Every instruction takes exactly 2 ticks** (fetch, then execute), so the reference and the gate-level CPU stay in step. If 3b needs more, it changes in one place in each.
+    - **Unused addresses read 0** and ignore writes: full address decoding, no mirrored copies.
+    - **`RANDOM` steps every tick**, whether or not it's read, so button timing makes games feel random but a recorded run replays exactly.
+    - **Programs live next to the chips** in `chips/`, so a Rom can say `file: "pong.asm"`.
+    - **A Rom's words are always 16 bits**, Crumb's word size. `.hex` files work too, for machine code that didn't come from our assembler.
+    - **The assembler optimizes a little:** a return merges into the instruction before it, a call just before a return becomes a jump (a tail call), and a return nothing can reach is left out.
+  - Known limits: the app can show a Rom's program, but it can't run a Crumb program yet. The screen, gamepad and cartridge menu come with the console in 3c.
+- **3b, the CPU in gates.** ALU16, stacks, program counter and control as `.chip` files, each with tests, all built from our own parts. *Done when:* it runs a counting program on the number display.
+- **3c, the console.** Screen panel, gamepad, LEDs and switches, number display, text console, frame counter and random port in the app, plus the cartridge menu.
+- **3d, debugger and turbo.** Step one instruction, breakpoints, a register, stack and memory view, and a turbo mode fast enough for games.
+- **3e, games.** Pong, then Tetris, then Space Invaders.
+
+#### Still open
+
+- Speed: the simulator works bit by bit, and Crumb will be a few thousand gates. Measure once 3b exists, then decide how turbo works and how many ticks make a frame (16384 for now).
 
 ### Phase 4: Silicon
 
@@ -251,9 +329,8 @@ Verilog export, Yosys synthesis, real gate counts, 3D layer viewer, FPGA, maybe 
 
 ## Open questions (later)
 
-- Target chip and its name (before Phase 3)
 - Loop syntax for repeated parts
-- Realistic per-gate delays and a turbo mode
+- Realistic per-gate delays (turbo mode is now part of Phase 3)
 - Light theme toggle
 
 ## Setup status

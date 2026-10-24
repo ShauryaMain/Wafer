@@ -203,7 +203,7 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState, s: &wafer_core::schem
         }
     });
 
-    if let NodeKind::Gate { name, kind: wafer_core::GateKind::Ram, .. } = &node.kind {
+    if let NodeKind::Gate { name, kind: wafer_core::GateKind::Ram | wafer_core::GateKind::Rom, .. } = &node.kind {
         ui.add_space(6.0);
         memory_view(ui, state, name);
     }
@@ -273,6 +273,10 @@ fn memory_view(ui: &mut egui::Ui, state: &AppState, name: &str) {
     let current = bits_to_u64(&sim.values(&ram.addr));
     let words: Vec<&[Logic]> = sim.memory(index).chunks(width).collect();
     let digits = format!("{:X}", words.len().saturating_sub(1)).len();
+    if ram.rom.is_some() {
+        rom_view(ui, state, name, words.len(), current);
+        return;
+    }
     ui.label(RichText::new(format!("{} words of {width} bits (live)", words.len())).color(theme::MUTED).small());
     egui::ScrollArea::vertical().id_salt("memory").max_height(240.0).show(ui, |ui| {
         for (row, chunk) in words.chunks(4).enumerate().take(1024) {
@@ -287,6 +291,36 @@ fn memory_view(ui: &mut egui::Ui, state: &AppState, name: &str) {
                         text.color(theme::TEXT)
                     });
                 }
+            });
+        }
+    });
+}
+
+/// A Rom's program, one word per line, disassembled when it came from a
+/// `.asm` file.
+fn rom_view(ui: &mut egui::Ui, state: &AppState, name: &str, size: usize, current: Option<u64>) {
+    let design = &state.ws.design;
+    let program = design
+        .chips
+        .get(&state.canvas.chip)
+        .and_then(|chip| chip.instances.iter().find(|i| i.name == name))
+        .and_then(|inst| inst.program.as_ref())
+        .and_then(|p| Some((p.name.clone(), design.programs.get(&p.path)?)));
+    let Some((file, program)) = program else { return };
+    let used = program.words.len();
+    ui.label(RichText::new(format!("{file}: {used} of {size} words (read-only)")).color(theme::MUTED).small());
+    let assembled = program.assembled.as_ref();
+    egui::ScrollArea::vertical().id_salt("rom").max_height(240.0).show(ui, |ui| {
+        for (addr, &word) in program.words.iter().enumerate().take(4096) {
+            if let Some(label) = assembled.and_then(|p| p.name_at(addr as u16)) {
+                ui.label(mono(format!("{label}:")).color(theme::BUS));
+            }
+            let text = assembled.map(|p| p.describe(addr as u16)).unwrap_or_default();
+            let line = mono(format!("{addr:04X}  {word:04X}  {text}"));
+            ui.label(if current == Some(addr as u64) {
+                line.color(theme::BACKGROUND).background_color(theme::BUS)
+            } else {
+                line.color(theme::TEXT)
             });
         }
     });

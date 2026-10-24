@@ -51,8 +51,8 @@ pub fn gate_shape(kind: GateKind) -> GateShape {
             extra: vec![vec![pos2(0.0, 45.0), pos2(28.0, 45.0), pos2(28.0, 35.0)]],
             ..plain(vec![pos2(6.0, 5.0), pos2(50.0, 25.0), pos2(6.0, 45.0)], vec![(25.0, 6.0)], 50.0)
         },
-        // Dff and Ram are drawn as boxes; this is only a fallback.
-        GateKind::Dff | GateKind::Ram => {
+        // Dff, Ram and Rom are drawn as boxes; this is only a fallback.
+        GateKind::Dff | GateKind::Ram | GateKind::Rom => {
             plain(vec![pos2(0.0, 0.0), pos2(66.0, 0.0), pos2(66.0, 50.0), pos2(0.0, 50.0)], Vec::new(), 66.0)
         }
     }

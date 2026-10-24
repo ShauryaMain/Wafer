@@ -314,7 +314,7 @@ pub fn extract_chip(
 fn refs(expr: &Expr) -> Vec<(&ast::Ident, Option<&ast::Ident>)> {
     match &expr.kind {
         ExprKind::Ref { base, port, .. } => vec![(base, port.as_ref())],
-        ExprKind::Literal(_) => Vec::new(),
+        ExprKind::Literal(_) | ExprKind::Str(_) => Vec::new(),
         ExprKind::Concat(parts) => parts.iter().flat_map(refs).collect(),
     }
 }
@@ -417,6 +417,11 @@ impl<'a> Editor<'a> {
             if let Some(arg) = arg {
                 parts.push(if i < leading { arg.clone() } else { format!("{port}: {arg}") });
             }
+        }
+        // Text settings like a Rom's `file: "pong.asm"` aren't wires; keep them.
+        for arg in call.args.iter().filter(|a| matches!(a.value.kind, ExprKind::Str(_))) {
+            let start = arg.name.as_ref().map_or(arg.value.span.start, |n| n.span.start);
+            parts.push(self.text[start..arg.value.span.end].to_string());
         }
         let new = format!("{}({})", call.chip.name, parts.join(", "));
         self.changes.push((call.span.start, call.span.end, new));
@@ -691,7 +696,7 @@ impl<'a> Editor<'a> {
 fn mentions(expr: &Expr, name: &str) -> bool {
     match &expr.kind {
         ExprKind::Ref { base, .. } => base.name == name,
-        ExprKind::Literal(_) => false,
+        ExprKind::Literal(_) | ExprKind::Str(_) => false,
         ExprKind::Concat(parts) => parts.iter().any(|p| mentions(p, name)),
     }
 }
@@ -814,6 +819,11 @@ mod tests {
             })
             .collect();
         sources.push((format!("{new_name}.chip").into(), out.new_text.clone()));
+        // Rom programs come along unchanged.
+        sources.extend(project.programs.iter().map(|&id| {
+            let f = project.sources.get(id);
+            (f.path.clone(), f.text.clone())
+        }));
         let after = Project::from_sources(sources);
         assert!(after.diagnostics.is_empty(), "{:#?}\n{}", after.diagnostics, out.parent_text);
         let design = Design::check(&after);
@@ -848,5 +858,13 @@ mod tests {
         assert!(new.contains("h1_sum   = h1.sum"), "{new}");
         assert!(parent.contains("h2   = HalfAdder(front1.h1_sum, cin)"), "{parent}");
         assert!(parent.contains("Or(front1.h1_carry, h2.carry)"), "{parent}");
+    }
+
+    #[test]
+    fn rewiring_a_rom_keeps_its_file() {
+        let text = "chip H {\n  in  a[4]\n  out y[16]\n\n  y = Rom(file: \"p.hex\")\n}\n";
+        let edit = Edit::Connect { sink: Sink::Instance { name: "y".into(), port: "addr".into() }, source: "a".into() };
+        let out = run(text, edit).unwrap();
+        assert!(out.contains("y = Rom(a, file: \"p.hex\")"), "{out}");
     }
 }

@@ -5,6 +5,8 @@ use crate::diag::{Diagnostic, FileId, Span};
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tok {
     Ident(String),
+    /// `"pong.asm"`: text in quotes, without them.
+    Str(String),
     /// `digits_width` is the width implied by the digits of a hex or binary
     /// literal (`0x0F` is 8 bits); decimal literals have none.
     Number {
@@ -38,6 +40,7 @@ impl Tok {
         match self {
             Tok::Ident(name) => format!("`{name}`"),
             Tok::Number { .. } => "a number".into(),
+            Tok::Str(_) => "text in quotes".into(),
             Tok::Newline => "the end of the line".into(),
             Tok::Comment => "a comment".into(),
             Tok::Eof => "the end of the file".into(),
@@ -61,7 +64,7 @@ impl Tok {
             Tok::Arrow => "<-",
             Tok::Pipe => "|",
             Tok::Star => "*",
-            Tok::Ident(_) | Tok::Number { .. } | Tok::Newline | Tok::Comment | Tok::Eof => "",
+            Tok::Ident(_) | Tok::Str(_) | Tok::Number { .. } | Tok::Newline | Tok::Comment | Tok::Eof => "",
         }
     }
 }
@@ -119,6 +122,19 @@ fn lex_inner(file: FileId, text: &str, diags: &mut Vec<Diagnostic>, comments: bo
                 if comments {
                     let end = start + text[start..i].trim_end().len();
                     tokens.push(Token { tok: Tok::Comment, span: Span::new(file, start, end) });
+                }
+            }
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && !matches!(bytes[i], b'"' | b'\n') {
+                    i += 1;
+                }
+                if bytes.get(i) == Some(&b'"') {
+                    let tok = Tok::Str(text[start + 1..i].to_string());
+                    i += 1;
+                    tokens.push(Token { tok, span: Span::new(file, start, i) });
+                } else {
+                    diags.push(Diagnostic::error(Span::new(file, start, i), "this text is missing its closing `\"`"));
                 }
             }
             b'<' if bytes.get(i + 1) == Some(&b'-') => {
@@ -200,6 +216,14 @@ mod tests {
                 Tok::Eof,
             ]
         );
+    }
+
+    #[test]
+    fn lexes_text_in_quotes() {
+        assert_eq!(toks("file: \"pong.asm\"")[2], Tok::Str("pong.asm".into()));
+        let mut diags = Vec::new();
+        lex(0, "\"oops\n", &mut diags);
+        assert_eq!(diags[0].message, "this text is missing its closing `\"`");
     }
 
     #[test]
