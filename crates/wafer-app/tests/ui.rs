@@ -7,8 +7,9 @@ use std::path::{Path, PathBuf};
 use egui::{Event, Key, Modifiers, PointerButton, Pos2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{Queryable, by};
-use wafer_app::app::WaferApp;
+use wafer_app::app::{Tab, WaferApp};
 use wafer_core::Logic;
+use wafer_core::logic::bits_from_u64;
 
 fn project(name: &str, files: &[(&str, &str)]) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("projects").join(name);
@@ -34,8 +35,11 @@ fn example_project(name: &str) -> PathBuf {
 
 fn open(dir: &Path) -> Harness<'static, WaferApp> {
     let dir = dir.to_path_buf();
-    let mut harness =
-        Harness::builder().with_size(egui::vec2(1400.0, 860.0)).wgpu().build_eframe(move |cc| WaferApp::new(cc, dir));
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1400.0, 860.0))
+        .with_step_dt(1.0 / 60.0)
+        .wgpu()
+        .build_eframe(move |cc| WaferApp::new(cc, dir));
     harness.state_mut().state.sim.instant = true;
     harness.run_steps(4);
     harness
@@ -319,4 +323,94 @@ fn makes_a_new_chip() {
     h.run_steps(3);
     assert_eq!(chip_text(&dir, "Counter.chip"), "chip Counter {\n}\n");
     assert_eq!(h.state().state.canvas.chip, "Counter");
+}
+
+/// When a signal first became 1, from the timeline's history.
+fn rose_at(h: &Harness<'static, WaferApp>, path: &str) -> u64 {
+    let trace = h.state().state.sim.trace.as_ref().expect("Add4 simulates");
+    let i = trace.index_of(path).unwrap_or_else(|| panic!("{path} isn't on the timeline"));
+    trace.changes[i].iter().skip(1).find(|(_, v)| v.as_slice() == [Logic::One]).map(|(t, _)| *t).expect("it rises")
+}
+
+#[test]
+fn watches_a_carry_ripple_in_the_timeline() {
+    let dir = example_project("ripple");
+    let mut h = open(&dir);
+    h.state_mut().show_tab(Tab::Timeline);
+    h.run_steps(2);
+    let sim = &mut h.state_mut().state.sim;
+    sim.set_input("a", bits_from_u64(0xF, 4));
+    sim.set_input("b", bits_from_u64(0x1, 4));
+    h.run_steps(4);
+
+    // 0xF + 0x1 carries out of every bit, one full adder after another.
+    let carries: Vec<u64> = ["fa0.cout", "fa1.cout", "fa2.cout", "fa3.cout"].iter().map(|p| rose_at(&h, p)).collect();
+    assert!(carries.windows(2).all(|w| w[0] < w[1]), "carries should ripple in order: {carries:?}");
+    assert_eq!(h.state().state.sim.read("cout"), Some(vec![Logic::One]));
+    shot(&mut h, "timeline_ripple");
+
+    // Scrubbing back to before the last carry shows the old value on the canvas.
+    let sim = &mut h.state_mut().state.sim;
+    sim.cursor = Some(carries[3] - 1);
+    assert_eq!(sim.value("fa3.cout"), Some(vec![Logic::Zero]));
+    assert_eq!(sim.value("fa2.cout"), Some(vec![Logic::One]));
+    h.run_steps(2);
+    shot(&mut h, "timeline_scrubbed");
+
+    // Clicking on the timeline scrubs; double-clicking goes back to live.
+    h.state_mut().state.sim.cursor = None;
+    let canvas = h.state().state.canvas.rect();
+    let on_waves = egui::pos2(canvas.center().x - 120.0, canvas.max.y + 110.0);
+    click(&mut h, on_waves);
+    assert!(h.state().state.sim.cursor.is_some(), "clicking the waves sets the cursor");
+    h.run_steps(60); // A second later, so the next two clicks are a fresh double-click.
+    for pressed in [true, false, true, false] {
+        press(&h, on_waves, pressed);
+        h.run_steps(1);
+    }
+    h.run_steps(1);
+    assert!(h.state().state.sim.cursor.is_none(), "double-click goes back to live");
+}
+
+#[test]
+fn code_panel_follows_the_canvas_and_saves_typing() {
+    let dir = example_project("code");
+    let mut h = open(&dir);
+    h.state_mut().state.open_chip("HalfAdder");
+    h.state_mut().show_tab(Tab::Code);
+    h.run_steps(3);
+    assert!(h.state().state.code.text().contains("sum   = Xor(a, b)"));
+
+    // A gate added on the canvas shows up in the code.
+    let c = h.state().state.canvas.rect().center();
+    add(&mut h, c + vec2(0.0, 120.0), "Nand");
+    h.run_steps(2);
+    assert!(h.state().state.code.text().contains("nand1 = Nand()"), "{}", h.state().state.code.text());
+
+    // Typing in the code saves to the file and updates the canvas.
+    let edited =
+        chip_text(&dir, "HalfAdder.chip").replace("nand1 = Nand()", "nand1 = Nand(a, b)\n  spare = Not(nand1)");
+    h.get(by().role(egui::accesskit::Role::MultilineTextInput)).focus();
+    h.run_steps(1);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.run_steps(1);
+    h.event(Event::Text(edited.clone()));
+    h.run_steps(1);
+    std::thread::sleep(wafer_app::code::SAVE_DELAY + std::time::Duration::from_millis(50));
+    h.run_steps(3);
+    assert_eq!(chip_text(&dir, "HalfAdder.chip"), edited);
+    assert!(keys(&h).contains(&"spare".to_string()), "the typed gate is on the canvas");
+    shot(&mut h, "code_panel");
+
+    // If the file changes outside the app mid-typing, the app asks instead of overwriting it.
+    h.event(Event::Text("// typing".into()));
+    h.run_steps(1);
+    let outside = edited.replace("spare = Not(nand1)", "spare = Not(a)");
+    std::fs::write(dir.join("HalfAdder.chip"), &outside).unwrap();
+    wait_for_reload(&mut h);
+    assert!(h.state().state.code.has_conflict());
+    assert_eq!(chip_text(&dir, "HalfAdder.chip"), outside, "the outside change wasn't overwritten");
+    h.get_by_label("Use the file's version").click();
+    h.run_steps(2);
+    assert_eq!(h.state().state.code.text(), outside);
 }

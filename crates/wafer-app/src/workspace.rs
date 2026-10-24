@@ -17,6 +17,10 @@ use wafer_core::{Design, Project};
 
 pub struct Problem {
     pub error: bool,
+    /// The file and byte range it points at.
+    pub file: PathBuf,
+    pub start: usize,
+    pub end: usize,
     pub location: String,
     pub message: String,
     /// The full message with the source line, as `wafer check` prints it.
@@ -37,6 +41,8 @@ pub struct Workspace {
     pub generation: u64,
     /// Goes up whenever saved positions change.
     pub layout_generation: u64,
+    /// Goes up on every reload, even when nothing parsed differently.
+    pub revision: u64,
     layouts: HashMap<PathBuf, LayoutFile>,
     seen: Vec<(PathBuf, SystemTime, u64)>,
     text_hash: u64,
@@ -82,6 +88,7 @@ impl Workspace {
             status: None,
             generation: 0,
             layout_generation: 0,
+            revision: 0,
             layouts: HashMap::new(),
             seen: Vec::new(),
             text_hash: 0,
@@ -96,6 +103,7 @@ impl Workspace {
     /// Re-reads every file. If one has a syntax error, the last clean
     /// version stays on screen.
     pub fn reload(&mut self) {
+        self.revision += 1;
         self.seen = scan(&self.dir);
         let project = match Project::load(&self.dir) {
             Ok(project) => project,
@@ -114,6 +122,9 @@ impl Workspace {
             .chain(&design.diagnostics)
             .map(|d| Problem {
                 error: d.is_error(),
+                file: project.sources.get(d.span.file).path.clone(),
+                start: d.span.start,
+                end: d.span.end,
                 location: short(project.sources.location(d.span)),
                 message: d.message.clone(),
                 detail: short(d.render(&project.sources, false)),
@@ -274,6 +285,17 @@ impl Workspace {
             Ok::<(), String>(())
         })();
         self.report(result);
+    }
+
+    /// Saves text typed in the code panel as one undoable step.
+    pub fn write_text(&mut self, path: &Path, text: &str) {
+        let snapshot = Snapshot::take(&[path.to_path_buf()]);
+        let result = std::fs::write(path, text).map_err(|e| e.to_string());
+        if self.report(result).is_some() {
+            self.undo.push(snapshot);
+            self.redo.clear();
+            self.reload();
+        }
     }
 
     /// Creates `Name.chip` with an empty chip in it.

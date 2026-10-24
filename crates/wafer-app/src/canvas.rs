@@ -206,7 +206,7 @@ impl Canvas {
             && let Hit::Wire(w) = hit
             && let Some(wire) = schematic.wires.get(w)
         {
-            let value = sim.read(&wire.signal).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
+            let value = sim.value(&wire.signal).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
             response.on_hover_text_at_pointer(format!("{} = {value}", wire.signal));
         }
     }
@@ -654,7 +654,7 @@ impl Canvas {
             .as_ref()
             .and_then(|id| s.wires.iter().position(|w| s.nodes[w.source.0].key == id.node && w.source.1 == id.pin));
         for (i, wire) in s.wires.iter().enumerate() {
-            let value = sim.read(&wire.signal);
+            let value = sim.value(&wire.signal);
             let style = theme::wire_style(wire.width, value.as_deref());
             let stroke = Stroke::new((style.width * z).max(1.0), style.color);
             if selected_wire == Some(i) || hit == Hit::Wire(i) {
@@ -687,7 +687,7 @@ impl Canvas {
             let size = vec2(node.w, node.h) * z;
             match &node.kind {
                 NodeKind::Input { name, width } => {
-                    let value = sim.read(name);
+                    let value = sim.value(name);
                     self.port_box(painter, at, size, *width, value.as_deref());
                     self.text(
                         painter,
@@ -699,7 +699,7 @@ impl Canvas {
                     );
                 }
                 NodeKind::Output { name, width } => {
-                    let value = sim.read(name);
+                    let value = sim.value(name);
                     if *width == 1 {
                         let (fill, _) = theme::port_colors(value.as_deref());
                         painter.circle(at + size / 2.0, 11.0 * z, fill, Stroke::new(1.5 * z, theme::GATE_STROKE));
@@ -820,7 +820,7 @@ impl Canvas {
             if wire.width == 1 {
                 continue;
             }
-            if let (Some((x, y)), Some(value)) = (wire.label_at, sim.read(&wire.signal)) {
+            if let (Some((x, y)), Some(value)) = (wire.label_at, sim.value(&wire.signal)) {
                 let style = theme::wire_style(wire.width, Some(&value));
                 let at = self.to_screen(pos2(x, y));
                 let text = format_bits(&value);

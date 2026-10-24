@@ -1,10 +1,13 @@
 //! Runs the current chip's simulation in real time: play, pause, step, and
-//! a speed in gate delays per second.
+//! a speed in gate delays per second. Every change is recorded for the
+//! timeline, which can also wind the view back to an earlier step.
 
 use std::collections::HashMap;
 
 use wafer_core::logic::Logic;
+use wafer_core::netlist::Signal;
 use wafer_core::testing::{self, BuiltinCheck, TestOutcome};
+use wafer_core::trace::Trace;
 use wafer_core::{Netlist, Simulator};
 
 use crate::workspace::Workspace;
@@ -25,6 +28,10 @@ pub struct SimRunner {
     budget: f32,
     /// Gate delays since an input last changed.
     pub steps: u64,
+    /// History of the chip's own signals, for the timeline.
+    pub trace: Option<Trace>,
+    /// When set, the canvas shows values from this step instead of now.
+    pub cursor: Option<u64>,
 }
 
 impl Default for SimRunner {
@@ -46,6 +53,8 @@ impl SimRunner {
             instant: false,
             budget: 0.0,
             steps: 0,
+            trace: None,
+            cursor: None,
         }
     }
 
@@ -60,6 +69,8 @@ impl SimRunner {
         self.chip = chip.to_string();
         self.generation = ws.generation;
         self.steps = 0;
+        self.cursor = None;
+        self.trace = None;
         match Netlist::build(&ws.design, chip) {
             Ok(netlist) => {
                 let mut sim = Simulator::new(netlist);
@@ -69,6 +80,7 @@ impl SimRunner {
                         sim.set_input_by_name(name, bits);
                     }
                 }
+                self.trace = Some(Trace::new(&sim, timeline_signals(&sim)));
                 self.sim = Some(sim);
                 self.error = None;
             }
@@ -79,8 +91,30 @@ impl SimRunner {
         }
     }
 
+    /// Starts the chip over: every gate back to unknown, inputs kept.
+    pub fn reset(&mut self) {
+        self.generation = 0;
+    }
+
+    /// A signal's value right now, ignoring the timeline cursor.
     pub fn read(&self, path: &str) -> Option<Vec<Logic>> {
         self.sim.as_ref()?.read(path)
+    }
+
+    /// A signal's value as the canvas should show it: at the timeline
+    /// cursor if one is set, otherwise now.
+    pub fn value(&self, path: &str) -> Option<Vec<Logic>> {
+        if let (Some(time), Some(trace)) = (self.cursor, &self.trace)
+            && let Some(index) = trace.index_of(path)
+        {
+            return trace.value_at(index, time).map(<[Logic]>::to_vec);
+        }
+        self.read(path)
+    }
+
+    /// The current time step.
+    pub fn now(&self) -> u64 {
+        self.sim.as_ref().map_or(0, Simulator::time)
     }
 
     pub fn set_input(&mut self, name: &str, bits: Vec<Logic>) {
@@ -89,7 +123,21 @@ impl SimRunner {
         {
             self.remembered.insert(name.to_string(), bits);
             self.steps = 0;
+            self.cursor = None;
+            if let Some(trace) = &mut self.trace {
+                trace.record_all(sim);
+                trace.mark(sim.time());
+            }
         }
+    }
+
+    fn step_once(&mut self) {
+        let Some(sim) = &mut self.sim else { return };
+        let changed = sim.step().to_vec();
+        if let Some(trace) = &mut self.trace {
+            trace.record(sim, &changed);
+        }
+        self.steps += 1;
     }
 
     /// Flips a 1-bit input between 0 and 1.
@@ -108,8 +156,7 @@ impl SimRunner {
     /// Advances by `dt` seconds of real time. Returns true while signals are
     /// still changing, so the caller keeps repainting.
     pub fn advance(&mut self, dt: f32) -> bool {
-        let Some(sim) = &mut self.sim else { return false };
-        if !self.playing || sim.is_settled() {
+        if !self.playing || self.is_settled() {
             self.budget = 0.0;
             return false;
         }
@@ -122,22 +169,18 @@ impl SimRunner {
             whole as u64
         };
         for _ in 0..steps {
-            if sim.is_settled() {
+            if self.is_settled() {
                 break;
             }
-            sim.step();
-            self.steps += 1;
+            self.step_once();
         }
-        !sim.is_settled()
+        !self.is_settled()
     }
 
     /// One gate delay, whether playing or paused.
     pub fn step(&mut self) {
-        if let Some(sim) = &mut self.sim
-            && !sim.is_settled()
-        {
-            sim.step();
-            self.steps += 1;
+        if !self.is_settled() {
+            self.step_once();
         }
     }
 
@@ -154,6 +197,20 @@ impl SimRunner {
             format!("paused after {}", delays(self.steps))
         }
     }
+}
+
+/// The signals the timeline shows: inputs, then outputs, then everything
+/// else at the chip's own level.
+fn timeline_signals(sim: &Simulator) -> Vec<Signal> {
+    let netlist = sim.netlist();
+    let is_port = |s: &Signal| netlist.inputs.iter().chain(&netlist.outputs).any(|p| p.path == s.path);
+    netlist
+        .inputs
+        .iter()
+        .chain(&netlist.outputs)
+        .cloned()
+        .chain(netlist.signals.iter().filter(|s| s.depth == 0 && !is_port(s)).cloned())
+        .collect()
 }
 
 /// The latest test results for the current chip.

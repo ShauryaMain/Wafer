@@ -78,7 +78,7 @@ pub fn inspector(ui: &mut egui::Ui, state: &mut AppState) {
         {
             heading(ui, "WIRE");
             ui.label(mono(&wire.signal));
-            let value = state.sim.read(&wire.signal).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
+            let value = state.sim.value(&wire.signal).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
             ui.label(format!("value {value} · {} bit{}", wire.width, if wire.width == 1 { "" } else { "s" }));
             ui.add_space(6.0);
             heading(ui, "FEEDS");
@@ -156,7 +156,7 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState, s: &wafer_core::schem
             let feed = s.wires.iter().find(|w| w.sinks.contains(&(i, p)));
             let text = match feed {
                 Some(w) => {
-                    let value = state.sim.read(&w.signal).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
+                    let value = state.sim.value(&w.signal).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
                     format!("{:<6} ← {} = {value}", pin.name, w.signal)
                 }
                 None if s.tags.iter().any(|t| (t.x + 2.0 - pin.x).abs() < 0.5 && (t.y - pin.y).abs() < 0.5) => {
@@ -177,7 +177,7 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState, s: &wafer_core::schem
         }
     }
     if let NodeKind::Output { name, .. } = &node.kind {
-        let value = state.sim.read(name).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
+        let value = state.sim.value(name).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
         ui.label(mono(format!("value {value}")));
     }
     if !node.outputs.is_empty() && !matches!(node.kind, NodeKind::Input { .. }) {
@@ -185,7 +185,7 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState, s: &wafer_core::schem
         for (p, pin) in node.outputs.iter().enumerate() {
             let wire = s.wires.iter().find(|w| w.source == (i, p));
             let value =
-                wire.and_then(|w| state.sim.read(&w.signal)).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
+                wire.and_then(|w| state.sim.value(&w.signal)).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
             ui.label(mono(format!("{:<6} → {value}", pin.name)));
         }
     }
@@ -248,7 +248,7 @@ fn chip_overview(ui: &mut egui::Ui, state: &mut AppState) {
     ui.add_space(4.0);
     heading(ui, "OUTPUTS");
     for port in &info.outputs {
-        let value = state.sim.read(&port.name).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
+        let value = state.sim.value(&port.name).map(|v| format_bits(&v)).unwrap_or_else(|| "?".into());
         ui.label(mono(format!("{:<6} {value}", port.name)));
     }
     ui.add_space(12.0);
@@ -383,12 +383,4 @@ pub fn problems(ui: &mut egui::Ui, state: &mut AppState) {
             .on_hover_text(mono(&problem.detail));
         }
     });
-}
-
-pub fn timeline(ui: &mut egui::Ui) {
-    ui.add_space(8.0);
-    ui.label(
-        RichText::new("The waveform timeline arrives in milestone 1c: every signal over time, with scrubbing.")
-            .color(theme::MUTED),
-    );
 }

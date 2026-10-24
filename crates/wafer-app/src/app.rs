@@ -8,10 +8,11 @@ use egui::{Key, KeyboardShortcut, Modifiers, RichText};
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 
 use crate::canvas::Canvas;
-use crate::panels;
+use crate::code::CodePanel;
 use crate::simrun::{SimRunner, TestResults};
-use crate::theme;
+use crate::timeline::{self, TimelineView};
 use crate::workspace::Workspace;
+use crate::{panels, theme};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tab {
@@ -21,6 +22,7 @@ pub enum Tab {
     Tests,
     Problems,
     Timeline,
+    Code,
 }
 
 /// Everything except the dock layout, so panels can borrow it freely.
@@ -32,6 +34,8 @@ pub struct AppState {
     pub new_chip: String,
     /// The inspector's name field: (node key it belongs to, text).
     pub rename: (String, String),
+    pub timeline: TimelineView,
+    pub code: CodePanel,
 }
 
 pub struct WaferApp {
@@ -55,9 +59,20 @@ impl WaferApp {
             tests: None,
             new_chip: String::new(),
             rename: (String::new(), String::new()),
+            timeline: TimelineView::default(),
+            code: CodePanel::default(),
             ws,
         };
         WaferApp { state, dock: default_dock() }
+    }
+}
+
+impl WaferApp {
+    /// Brings a panel's tab to the front.
+    pub fn show_tab(&mut self, tab: Tab) {
+        if let Some(path) = self.dock.find_tab(&tab) {
+            let _ = self.dock.set_active_tab(path);
+        }
     }
 }
 
@@ -65,13 +80,14 @@ fn default_dock() -> DockState<Tab> {
     let mut dock = DockState::new(vec![Tab::Canvas]);
     let surface = dock.main_surface_mut();
     let [center, _] = surface.split_left(NodeIndex::root(), 0.16, vec![Tab::Chips]);
-    let [center, _] = surface.split_right(center, 0.75, vec![Tab::Inspector]);
-    surface.split_below(center, 0.74, vec![Tab::Tests, Tab::Problems, Tab::Timeline]);
+    let [center, _] = surface.split_right(center, 0.72, vec![Tab::Inspector, Tab::Code]);
+    surface.split_below(center, 0.68, vec![Tab::Timeline, Tab::Tests, Tab::Problems]);
     dock
 }
 
 impl AppState {
     pub fn open_chip(&mut self, chip: &str) {
+        self.code.flush(&mut self.ws);
         self.canvas.open(chip);
         self.tests = None;
     }
@@ -210,6 +226,7 @@ impl TabViewer for Tabs<'_> {
             Tab::Problems if errors > 0 => RichText::new(format!("Problems ({errors})")).color(theme::UNKNOWN).into(),
             Tab::Problems => "Problems".into(),
             Tab::Timeline => "Timeline".into(),
+            Tab::Code => "Code".into(),
         }
     }
 
@@ -221,7 +238,8 @@ impl TabViewer for Tabs<'_> {
             Tab::Inspector => panels::inspector(ui, state),
             Tab::Tests => panels::tests(ui, state),
             Tab::Problems => panels::problems(ui, state),
-            Tab::Timeline => panels::timeline(ui),
+            Tab::Timeline => timeline::ui(ui, &mut state.timeline, &mut state.sim),
+            Tab::Code => state.code.ui(ui, &mut state.ws, &mut state.canvas),
         }
     }
 

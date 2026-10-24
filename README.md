@@ -4,8 +4,8 @@ A "Blender for computer chips": design digital chips from gates, simulate
 them one gate delay at a time, and test them. See [PLANNING.md](PLANNING.md)
 for the vision, the decisions so far, and the roadmap.
 
-Milestones 1a (the engine and the `wafer` command) and 1b (the desktop app
-with its canvas) are done.
+Milestones 1a (the engine and the `wafer` command), 1b (the desktop app
+with its canvas) and 1c (the waveform timeline and code panel) are done.
 
 ## The app
 
@@ -34,6 +34,12 @@ anything else changes them, so you can edit text and boxes side by side.
 
 Rename things in the Inspector. Positions are saved in `Name.layout.json`
 next to each `.chip` file.
+
+The **Timeline** tab shows every signal over time, one gate delay per
+step. Click or drag on it to scrub back in time (the canvas follows), and
+double-click to return to live. The **Code** tab (next to the Inspector)
+is the chip's file: edit it there and the canvas updates; select a box and
+its line lights up.
 
 ## The `wafer` command
 

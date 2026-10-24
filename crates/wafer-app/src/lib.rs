@@ -3,8 +3,10 @@
 
 pub mod app;
 pub mod canvas;
+pub mod code;
 pub mod panels;
 pub mod shapes;
 pub mod simrun;
 pub mod theme;
+pub mod timeline;
 pub mod workspace;

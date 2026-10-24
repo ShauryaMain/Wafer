@@ -207,10 +207,14 @@ Rules:
     - Dragging individual wire segments.
     - Cmd+K command search.
     - A router that steers wires around boxes (wires can cross boxes after you move things; move the box to tidy up).
-- **1c, Text & time.**
+- **1c, Text & time. ✅ Done 2026-10-24.**
   - Editable code panel synced with the canvas.
   - Waveform timeline showing every signal over time steps, with scrubbing.
   - *Done when:* you watch a carry ripple through a 4-bit adder in the timeline.
+  - Built:
+    - Timeline: one lane per signal at the chip's own level, buses drawn as hex segments, X shown red, markers where inputs changed. Click or drag to scrub (the canvas and Inspector show that step), double-click for live, pinch to zoom, Fit, and a Reset that puts every gate back to X.
+    - Code panel: syntax colors, problems underlined, saves 0.35 s after you stop typing (or Cmd+S). Selecting a box highlights its line; putting the cursor on a line selects its box. If the file changes outside the app while you're typing, it asks which version to keep.
+  - Not yet: picking which signals the timeline shows (it shows the chip's own level; inner signals come with 1d's dive-in).
 - **1d, Hierarchy.**
   - Make Chip from a selection (Cmd+G).
   - Dive in and out with live values inside, and a working hierarchy tree.
