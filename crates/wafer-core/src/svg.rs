@@ -95,7 +95,11 @@ pub fn render(
     text(&mut out, MARGIN, 48.0, 11.0, theme.muted, "start", subtitle);
 
     // Wires first, so boxes sit on top of their ends.
-    for wire in &schematic.wires {
+    // Floating (Z) wires first, so a live value drawn over the same spot wins.
+    let floating = |w: &&crate::schematic::Wire| values(&w.signal).is_some_and(|v| v.iter().all(|&b| b == Logic::Z));
+    let mut order: Vec<&crate::schematic::Wire> = schematic.wires.iter().collect();
+    order.sort_by_key(|w| !floating(w));
+    for wire in order {
         let value = values(&wire.signal);
         let s = stroke(theme, wire.width, value.as_deref());
         let mut d = String::new();
@@ -145,33 +149,14 @@ pub fn render(
                     &port_label(name, *width),
                 );
             }
-            NodeKind::Gate { name, kind } => {
+            NodeKind::Gate { name, kind, label } if kind.is_sequential() => {
+                block(&mut out, theme, node, label, name, true);
+            }
+            NodeKind::Gate { name, kind, .. } => {
                 gate(&mut out, theme, *kind, x, y);
                 text(&mut out, x + GATE_W / 2.0, y - 9.0, 11.0, theme.muted, "middle", name);
             }
-            NodeKind::Chip { name, chip } => {
-                let _ = writeln!(
-                    out,
-                    r#"<rect x="{x:.1}" y="{y:.1}" width="{:.1}" height="{:.1}" rx="6" fill="{}" stroke="{}" stroke-width="1.5"/>"#,
-                    node.w, node.h, theme.gate_fill, theme.gate_stroke
-                );
-                text(&mut out, x + node.w / 2.0, y + 16.0, 12.0, theme.text, "middle", chip);
-                let _ = writeln!(
-                    out,
-                    r#"<line x1="{x:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="{}" stroke-width="1"/>"#,
-                    y + CHIP_HEADER - 2.0,
-                    x + node.w,
-                    y + CHIP_HEADER - 2.0,
-                    theme.grid
-                );
-                for pin in &node.inputs {
-                    text(&mut out, pin.x + 8.0, pin.y, 11.0, theme.muted, "start", &pin.name);
-                }
-                for pin in &node.outputs {
-                    text(&mut out, pin.x - 8.0, pin.y, 11.0, theme.muted, "end", &pin.name);
-                }
-                text(&mut out, x + node.w / 2.0, y - 9.0, 11.0, theme.muted, "middle", name);
-            }
+            NodeKind::Chip { name, chip } => block(&mut out, theme, node, chip, name, false),
         }
     }
 
@@ -226,9 +211,85 @@ fn port_box(out: &mut String, theme: &Theme, x: f32, y: f32, w: f32, width: usiz
     text(out, x + w / 2.0, y + PORT_H / 2.0, 12.0, text_color, "middle", &shown);
 }
 
+/// A chip (or a box-shaped built-in like Dff and Ram): a labeled box with
+/// its pin names inside, and a clock triangle if it ticks.
+fn block(out: &mut String, theme: &Theme, node: &crate::schematic::Node, title: &str, name: &str, clocked: bool) {
+    let (x, y) = (node.x, node.y);
+    let _ = writeln!(
+        out,
+        r#"<rect x="{x:.1}" y="{y:.1}" width="{:.1}" height="{:.1}" rx="6" fill="{}" stroke="{}" stroke-width="1.5"/>"#,
+        node.w, node.h, theme.gate_fill, theme.gate_stroke
+    );
+    text(out, x + node.w / 2.0, y + 16.0, 12.0, theme.text, "middle", title);
+    let _ = writeln!(
+        out,
+        r#"<line x1="{x:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="{}" stroke-width="1"/>"#,
+        y + CHIP_HEADER - 2.0,
+        x + node.w,
+        y + CHIP_HEADER - 2.0,
+        theme.grid
+    );
+    for pin in &node.inputs {
+        text(out, pin.x + 8.0, pin.y, 11.0, theme.muted, "start", &pin.name);
+    }
+    for pin in &node.outputs {
+        text(out, pin.x - 8.0, pin.y, 11.0, theme.muted, "end", &pin.name);
+    }
+    if clocked {
+        let b = y + node.h;
+        let _ = writeln!(
+            out,
+            r#"<path d="M{x:.1},{:.1} L{:.1},{:.1} L{x:.1},{:.1}" fill="none" stroke="{}" stroke-width="1.5"/>"#,
+            b - 16.0,
+            x + 9.0,
+            b - 10.0,
+            b - 4.0,
+            theme.gate_stroke
+        );
+    }
+    text(out, x + node.w / 2.0, y - 9.0, 11.0, theme.muted, "middle", name);
+}
+
 /// Classic gate symbols in a 66×50 box: inputs on the left, output at the
 /// middle of the right edge.
 fn gate(out: &mut String, theme: &Theme, kind: GateKind, x: f32, y: f32) {
+    let stroke = theme.gate_stroke;
+    match kind {
+        GateKind::Mux => {
+            let _ = writeln!(
+                out,
+                r#"<g transform="translate({x:.1},{y:.1})" stroke="{stroke}" stroke-width="2" fill="none">"#
+            );
+            for iy in [12.0, 25.0, 38.0] {
+                let _ = writeln!(out, r#"<line x1="0" y1="{iy}" x2="6" y2="{iy}"/>"#);
+            }
+            let _ = writeln!(out, r#"<path d="M6,0 L54,10 L54,40 L6,50 Z" fill="{}"/>"#, theme.gate_fill);
+            for (iy, label) in [(12.0, "0"), (25.0, "1"), (38.0, "s")] {
+                let _ = writeln!(
+                    out,
+                    r#"<text x="10" y="{:.1}" font-size="9" fill="{}" stroke="none">{label}</text>"#,
+                    iy + 3.0,
+                    theme.muted
+                );
+            }
+            let _ = writeln!(out, r#"<line x1="54" y1="25" x2="{GATE_W}" y2="25"/>"#);
+            out.push_str("</g>\n");
+            return;
+        }
+        GateKind::TriBuf => {
+            let _ = writeln!(
+                out,
+                r#"<g transform="translate({x:.1},{y:.1})" stroke="{stroke}" stroke-width="2" fill="none">"#
+            );
+            let _ = writeln!(out, r#"<line x1="0" y1="25" x2="6" y2="25"/>"#);
+            let _ = writeln!(out, r#"<path d="M0,45 H28 V35"/>"#);
+            let _ = writeln!(out, r#"<path d="M6,5 L50,25 L6,45 Z" fill="{}"/>"#, theme.gate_fill);
+            let _ = writeln!(out, r#"<line x1="50" y1="25" x2="{GATE_W}" y2="25"/>"#);
+            out.push_str("</g>\n");
+            return;
+        }
+        _ => {}
+    }
     let (body, extra, back_x, tip): (&str, Option<&str>, f32, f32) = match kind {
         GateKind::And | GateKind::Nand => ("M0,0 H30 A25,25 0 0 1 30,50 H0 Z", None, 0.0, 55.0),
         GateKind::Or | GateKind::Nor => ("M0,0 Q14,25 0,50 Q36,50 55,25 Q36,0 0,0 Z", None, 6.0, 55.0),
@@ -236,9 +297,9 @@ fn gate(out: &mut String, theme: &Theme, kind: GateKind, x: f32, y: f32) {
             ("M6,0 Q19,25 6,50 Q38,50 56,25 Q38,0 6,0 Z", Some("M0,0 Q13,25 0,50"), 11.5, 56.0)
         }
         GateKind::Not => ("M4,7 L50,25 L4,43 Z", None, 4.0, 50.0),
+        GateKind::Mux | GateKind::TriBuf | GateKind::Dff | GateKind::Ram => unreachable!("drawn separately"),
     };
     let bubble = matches!(kind, GateKind::Nand | GateKind::Nor | GateKind::Xnor | GateKind::Not);
-    let stroke = theme.gate_stroke;
     let _ = writeln!(out, r#"<g transform="translate({x:.1},{y:.1})" stroke="{stroke}" stroke-width="2" fill="none">"#);
     let ins: &[f32] = if kind == GateKind::Not { &[25.0] } else { &[15.0, 35.0] };
     for &iy in ins {

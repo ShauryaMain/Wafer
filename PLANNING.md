@@ -177,7 +177,7 @@ Rules:
   - X spreads through logic, for example `And(X, 1) = X` but `And(X, 0) = 0`.
   - Z is what a disconnected or switched-off driver outputs.
 - **Timing:** event-driven, one time step per gate. A clock tick runs until every signal settles, or is reported as oscillating.
-- **Built-in parts:** Nand, And, Or, Not, Xor, Nor, Xnor, the constants 0 and 1 (Phase 1); Dff (flip-flop), Ram, Rom and TriBuf (Phase 2).
+- **Built-in parts:** Nand, And, Or, Not, Xor, Nor, Xnor, the constants 0 and 1 (Phase 1); Dff (flip-flop), Ram, TriBuf and Mux (Phase 2); Rom (Phase 3).
 
 ## Roadmap
 
@@ -225,13 +225,25 @@ Rules:
     - The Chips panel shows the open chip's insides as a tree.
   - Also added to the code editor (requested): Format (button or Shift+Alt+F, plus `wafer fmt`) and autocompletion (gates and chips after `=`, outputs after `name.`, signals and named inputs inside calls, with the call's signature as a hint).
 
-### Phase 2: Time & Memory
+### Phase 2: Time & Memory ✅ Done 2026-10-24
 
 Clock, flip-flops, registers, Ram/Rom, shared buses with tri-state drivers, `tick` tests. *Milestone: an 8-bit counter.*
 
+- Built:
+  - New built-ins: `Dff(d)` (a flip-flop, or a whole register on a bus), `Ram(addr, data, write)` (reads any time, writes on a tick), `TriBuf(a, en)`, and `Mux(a, b, sel)`.
+  - One global clock: Tick (T key or button), or Auto at a chosen rate. A tick settles the logic, samples every flip-flop at once, stores RAM writes, then the logic settles again.
+  - Shared buses: `data <- TriBuf(x, en)` lines, with drivers named `data_d1`, `data_d2`, ... Drivers that let go are Z; two at once is X.
+  - Tests can use `set`, `tick` and `expect` steps (mixed with truth-table rows); `expect` checks outputs, wires or boxes.
+  - The timeline has a clk lane, and the Inspector shows a Ram's contents live.
+  - Examples: Add8, Register8, Counter8 (the milestone, tested through 255 ticks and the wrap), BusDemo, Scratchpad.
+- Changes from the plan:
+  - `Mux` is built in too: registers and counters need one constantly. You can still build your own from gates.
+  - Flip-flops start unknown (X), like real ones, so sequential chips need a reset. RAM starts cleared to 0.
+  - ROM moved to Phase 3: it needs a program to fill it, which comes with the assembler.
+
 ### Phase 3: Computer
 
-Decide the target chip and its name. Instruction set, assembler, CPU debugger (registers, program counter, memory view). *Milestone: our CPU runs a real program.*
+Decide the target chip and its name. Instruction set, assembler, ROM loaded from assembled programs, CPU debugger (registers, program counter, memory view). *Milestone: our CPU runs a real program.*
 
 ### Phase 4: Silicon
 

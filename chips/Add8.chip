@@ -1,0 +1,21 @@
+// Adds two 8-bit numbers with two 4-bit adders: the carry out of the low
+// half feeds the high half.
+chip Add8 {
+  in  a[8], b[8], cin
+  out sum[8], cout
+
+  lo = Add4(a[3:0], b[3:0], cin)
+  hi = Add4(a[7:4], b[7:4], lo.cout)
+
+  sum  = {hi.sum, lo.sum}
+  cout = hi.cout
+}
+
+test Add8 {
+  // a    b    cin | sum  cout
+     0x00 0x00 0   | 0x00 0
+     0x12 0x34 0   | 0x46 0
+     0x0F 0x01 0   | 0x10 0
+     0xFF 0x01 0   | 0x00 1
+     0x80 0x80 1   | 0x01 1
+}

@@ -1,0 +1,17 @@
+// Two values share one bus. Each TriBuf lets go of the bus (Z) unless its
+// enable is 1; if both drive at once they fight, and the bus reads X.
+chip BusDemo {
+  in  a[8], b[8], use_a, use_b
+  out bus[8]
+
+  bus <- TriBuf(a, use_a)
+  bus <- TriBuf(b, use_b)
+}
+
+test BusDemo {
+  // a    b    use_a use_b | bus
+     0x0F 0xF0 1     0     | 0x0F
+     0x0F 0xF0 0     1     | 0xF0
+     0x0F 0xF0 0     0     | Z
+     0x0F 0xF0 1     1     | X  // both at once: a bus fight
+}

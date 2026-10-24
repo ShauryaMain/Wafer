@@ -119,9 +119,17 @@ impl AppState {
                 i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z))
             });
             let undo = ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Z)));
-            let (space, right) = ctx.input(|i| {
-                (i.key_pressed(Key::Space) && !i.modifiers.any(), i.key_pressed(Key::ArrowRight) && !i.modifiers.any())
+            let (space, right, tick) = ctx.input(|i| {
+                let plain = !i.modifiers.any();
+                (
+                    i.key_pressed(Key::Space) && plain,
+                    i.key_pressed(Key::ArrowRight) && plain,
+                    i.key_pressed(Key::T) && plain,
+                )
             });
+            if tick {
+                self.sim.tick();
+            }
             if redo {
                 self.ws.redo();
             } else if undo {
@@ -160,6 +168,17 @@ impl AppState {
                 egui::Slider::new(&mut self.sim.speed, 1.0..=1000.0).logarithmic(true).suffix(" delays/s"),
             );
             ui.checkbox(&mut self.sim.instant, "Instant");
+            if self.sim.has_clock() {
+                ui.separator();
+                if ui.button("Tick").on_hover_text("One clock tick (T)").clicked() {
+                    self.sim.tick();
+                }
+                ui.checkbox(&mut self.sim.auto_clock, "Auto").on_hover_text("Tick the clock by itself while playing");
+                ui.add_enabled(
+                    self.sim.auto_clock,
+                    egui::DragValue::new(&mut self.sim.clock_hz).range(0.1..=200.0).speed(0.1).suffix(" Hz"),
+                );
+            }
             let color = if self.sim.error.is_some() {
                 theme::UNKNOWN
             } else if self.sim.is_settled() {

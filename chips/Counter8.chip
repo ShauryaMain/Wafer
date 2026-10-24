@@ -1,0 +1,30 @@
+// Counts up by one on every clock tick while `en` is 1, and goes back to 0
+// on a tick while `reset` is 1. Flip-flops start out unknown (X), so reset
+// it first.
+chip Counter8 {
+  in  reset, en
+  out count[8]
+
+  inc   = Add8(count, 1, 0)
+  step  = Mux(count, inc.sum, en)
+  next  = Mux(step, 0, reset)
+  count = Dff(next)
+}
+
+test Counter8 {
+  set reset = 1, en = 0
+  tick
+  expect count = 0
+  set reset = 0, en = 1
+  tick
+  expect count = 1
+  tick 14
+  expect count = 15
+  tick 240
+  expect count = 255
+  tick
+  expect count = 0  // wraps around
+  set en = 0
+  tick 5
+  expect count = 0  // holds while en is 0
+}

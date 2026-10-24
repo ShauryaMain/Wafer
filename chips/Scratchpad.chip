@@ -1,0 +1,19 @@
+// 16 bytes of memory. `out` always shows the byte at `addr`; on a clock
+// tick with `write` at 1, `data` is stored there.
+chip Scratchpad {
+  in  addr[4], data[8], write
+  out out[8]
+
+  out = Ram(addr, data, write)
+}
+
+test Scratchpad {
+  set addr = 3, data = 0x42, write = 1
+  tick
+  set write = 0
+  expect out = 0x42
+  set addr = 4
+  expect out = 0  // memory starts cleared
+  set addr = 3
+  expect out = 0x42
+}

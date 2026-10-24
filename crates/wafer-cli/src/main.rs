@@ -194,7 +194,7 @@ fn test(project: &Project, design: &Design, only: &[String], errors: usize, ui: 
             let passed: usize = outcomes.iter().map(|o| o.passed_rows()).sum();
             rows_passed += passed;
             rows_failed += total - passed;
-            summary.push(format!("{passed}/{total} rows"));
+            summary.push(format!("{passed}/{total} checks"));
         }
         for outcome in &outcomes {
             if let Some(error) = &outcome.error {
@@ -202,7 +202,10 @@ fn test(project: &Project, design: &Design, only: &[String], errors: usize, ui: 
             }
             for row in outcome.rows.iter().filter(|r| !r.passed()) {
                 let at = project.sources.location(row.span);
-                let inputs: Vec<String> = row.inputs.iter().map(|(n, v)| format!("{n}={v}")).collect();
+                let mut inputs: Vec<String> = row.inputs.iter().map(|(n, v)| format!("{n}={v}")).collect();
+                if row.ticks > 0 {
+                    inputs.insert(0, format!("after tick {}:", row.ticks));
+                }
                 let problem = if row.unsettled {
                     format!("still changing after {MAX_STEPS} steps (is something oscillating?)")
                 } else {
@@ -250,9 +253,9 @@ fn test(project: &Project, design: &Design, only: &[String], errors: usize, ui: 
         }
     }
 
-    let mut tail = vec![format!("{} passed", plural(rows_passed, "row"))];
+    let mut tail = vec![format!("{} passed", plural(rows_passed, "check"))];
     if rows_failed > 0 {
-        tail.push(ui.fail(&format!("{} failed", plural(rows_failed, "row"))));
+        tail.push(ui.fail(&format!("{} failed", plural(rows_failed, "check"))));
     }
     if untested > 0 {
         tail.push(format!("{} without tests", plural(untested, "chip")));

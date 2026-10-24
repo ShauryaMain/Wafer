@@ -1,6 +1,6 @@
 //! Runs `test` blocks, and checks home-made gates against the built-in ones.
 
-use crate::check::{Design, TestInfo};
+use crate::check::{Design, TestInfo, TestStepInfo};
 use crate::diag::Span;
 use crate::gate::GateKind;
 use crate::logic::{Logic, format_bits};
@@ -28,14 +28,17 @@ impl TestOutcome {
     }
 }
 
+/// The result of one check: a truth-table row or an `expect` step.
 pub struct RowOutcome {
     pub span: Span,
-    /// Input name and the value it was set to.
+    /// Every input and its value at the time.
     pub inputs: Vec<(String, String)>,
     pub failures: Vec<Failure>,
     pub unsettled: bool,
     /// Time steps until the last signal stopped changing.
     pub steps: u64,
+    /// Clock ticks so far.
+    pub ticks: u64,
 }
 
 impl RowOutcome {
@@ -50,8 +53,8 @@ pub struct Failure {
     pub actual: String,
 }
 
-/// Runs every row in order. State carries over between rows, so a latch
-/// can be set in one row and checked in the next.
+/// Runs every step in order. State carries over, so a latch can be set in
+/// one row and checked in the next, and `tick` moves the clock.
 pub fn run_test(design: &Design, test: &TestInfo) -> TestOutcome {
     let mut outcome = TestOutcome { chip: test.chip.clone(), span: test.span, rows: Vec::new(), error: None };
     let netlist = match Netlist::build(design, &test.chip) {
@@ -62,40 +65,67 @@ pub fn run_test(design: &Design, test: &TestInfo) -> TestOutcome {
         }
     };
     let mut sim = Simulator::new(netlist);
-    for row in &test.rows {
-        for (bits, &port) in row.inputs.iter().zip(&test.input_ports) {
-            sim.set_input(port, bits);
-        }
-        let settled = sim.settle(MAX_STEPS);
-        let netlist = sim.netlist();
-        let inputs = test
-            .input_ports
-            .iter()
-            .zip(&row.inputs)
-            .map(|(&port, bits)| (netlist.inputs[port].path.clone(), format_bits(bits)))
-            .collect();
-        let mut failures = Vec::new();
-        for (expected, &port) in row.outputs.iter().zip(&test.output_ports) {
-            let Some(expected) = expected else { continue };
-            let signal = &netlist.outputs[port];
-            let actual = sim.values(&signal.nets);
-            if &actual != expected {
-                failures.push(Failure {
-                    output: signal.path.clone(),
-                    expected: format_bits(expected),
-                    actual: format_bits(&actual),
-                });
+    for step in &test.steps {
+        match step {
+            TestStepInfo::Row { span, inputs, checks } => {
+                for (port, bits) in inputs {
+                    sim.set_input(*port, bits);
+                }
+                let settled = sim.settle(MAX_STEPS);
+                outcome.rows.push(check(&sim, *span, checks, settled));
+            }
+            TestStepInfo::Set { inputs, .. } => {
+                for (port, bits) in inputs {
+                    sim.set_input(*port, bits);
+                }
+            }
+            TestStepInfo::Tick { span, count } => {
+                for _ in 0..*count {
+                    if sim.tick(MAX_STEPS).is_err() {
+                        let mut row = check(&sim, *span, &[], Err(crate::sim::Unsettled { steps: MAX_STEPS }));
+                        row.unsettled = true;
+                        outcome.rows.push(row);
+                        return outcome;
+                    }
+                }
+            }
+            TestStepInfo::Expect { span, checks } => {
+                let settled = sim.settle(MAX_STEPS);
+                outcome.rows.push(check(&sim, *span, checks, settled));
             }
         }
-        outcome.rows.push(RowOutcome {
-            span: row.span,
-            inputs,
-            failures,
-            unsettled: settled.is_err(),
-            steps: settled.unwrap_or(MAX_STEPS),
-        });
     }
     outcome
+}
+
+fn check(
+    sim: &Simulator,
+    span: Span,
+    checks: &[(String, Option<Vec<Logic>>)],
+    settled: Result<u64, crate::sim::Unsettled>,
+) -> RowOutcome {
+    let netlist = sim.netlist();
+    let inputs = netlist.inputs.iter().map(|s| (s.path.clone(), format_bits(&sim.values(&s.nets)))).collect();
+    let mut failures = Vec::new();
+    for (path, expected) in checks {
+        let Some(expected) = expected else { continue };
+        let actual = sim.read(path).unwrap_or_default();
+        if &actual != expected {
+            failures.push(Failure {
+                output: path.clone(),
+                expected: format_bits(expected),
+                actual: format_bits(&actual),
+            });
+        }
+    }
+    RowOutcome {
+        span,
+        inputs,
+        failures,
+        unsettled: settled.is_err(),
+        steps: settled.unwrap_or(MAX_STEPS),
+        ticks: sim.ticks(),
+    }
 }
 
 /// The result of comparing a home-made gate with the built-in one.
@@ -126,7 +156,7 @@ pub struct BuiltinMismatch {
 /// Returns `None` if the chip isn't named after a built-in gate or doesn't
 /// have the same shape (same number of 1-bit inputs, one 1-bit output).
 pub fn check_against_builtin(design: &Design, chip: &str) -> Option<BuiltinCheck> {
-    let gate = GateKind::from_name(chip)?;
+    let gate = GateKind::from_name(chip).filter(|g| !g.is_sequential())?;
     let info = design.chips.get(chip)?;
     let n = gate.inputs().len();
     let same_shape = info.inputs.len() == n
@@ -152,7 +182,8 @@ pub fn check_against_builtin(design: &Design, chip: &str) -> Option<BuiltinCheck
         }
         let _ = sim.settle(MAX_STEPS);
         let actual = sim.value(sim.netlist().outputs[0].nets[0]);
-        let expected = gate.eval(inputs[0], *inputs.last().unwrap_or(&inputs[0]));
+        let input = |i: usize| *inputs.get(i).unwrap_or(&inputs[0]);
+        let expected = gate.eval(input(0), input(1), input(2));
         if actual != expected {
             check.mismatches.push(BuiltinMismatch { inputs, expected, actual });
         }

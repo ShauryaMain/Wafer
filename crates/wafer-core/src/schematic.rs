@@ -61,10 +61,25 @@ pub struct Pin {
 
 #[derive(Clone, Debug)]
 pub enum NodeKind {
-    Input { name: String, width: usize },
-    Output { name: String, width: usize },
-    Gate { name: String, kind: GateKind },
-    Chip { name: String, chip: String },
+    Input {
+        name: String,
+        width: usize,
+    },
+    Output {
+        name: String,
+        width: usize,
+    },
+    /// A built-in part. `label` is what a box-shaped part (Dff, Ram) shows,
+    /// like `Ram 16×8`.
+    Gate {
+        name: String,
+        kind: GateKind,
+        label: String,
+    },
+    Chip {
+        name: String,
+        chip: String,
+    },
 }
 
 /// Everything drawn for one signal: the segments from its source to every
@@ -200,9 +215,19 @@ impl<'a> Graph<'a> {
         for inst in &info.instances {
             keys.push(inst.name.clone());
             match &inst.callee {
-                Callee::Gate { kind, .. } => {
-                    kinds.push(NodeKind::Gate { name: inst.name.clone(), kind: *kind });
-                    geoms.push(gate_geom(*kind));
+                Callee::Gate { kind, width, addr } => {
+                    let label = match kind {
+                        GateKind::Ram => format!("Ram {}×{width}", 1u64 << (*addr).min(63)),
+                        GateKind::Dff if *width > 1 => format!("Dff ×{width}"),
+                        _ => kind.name().to_string(),
+                    };
+                    let geom = if kind.is_sequential() {
+                        chip_geom(&label, &design.signature(&inst.callee))
+                    } else {
+                        gate_geom(*kind)
+                    };
+                    kinds.push(NodeKind::Gate { name: inst.name.clone(), kind: *kind, label });
+                    geoms.push(geom);
                 }
                 Callee::Chip(chip) => {
                     kinds.push(NodeKind::Chip { name: inst.name.clone(), chip: chip.clone() });
@@ -1088,8 +1113,8 @@ impl Resolver<'_> {
         let sig = self.design.signature(&inst.callee);
         let width = sig.outputs.get(source.pin).map_or(1, |o| o.1);
         let path = match inst.drives {
-            Some(Name::Output(i)) => self.info.outputs[i].name.clone(),
-            Some(Name::Wire(i)) => self.info.wires[i].name.clone(),
+            Some(Name::Output(i)) if !inst.shared => self.info.outputs[i].name.clone(),
+            Some(Name::Wire(i)) if !inst.shared => self.info.wires[i].name.clone(),
             _ if sig.outputs.len() == 1 => inst.name.clone(),
             _ => format!("{}.{}", inst.name, sig.outputs.get(source.pin).map_or("out", |o| o.0.as_str())),
         };
@@ -1122,7 +1147,12 @@ fn port_geom(width: usize, is_input: bool) -> Geom {
 }
 
 fn gate_geom(kind: GateKind) -> Geom {
-    let in_off = if kind.inputs().len() == 1 { vec![GATE_H / 2.0] } else { vec![15.0, 35.0] };
+    let in_off = match kind {
+        GateKind::Mux => vec![12.0, 25.0, 38.0],
+        GateKind::TriBuf => vec![25.0, 45.0],
+        _ if kind.inputs().len() == 1 => vec![GATE_H / 2.0],
+        _ => vec![15.0, 35.0],
+    };
     Geom {
         w: GATE_W,
         h: GATE_H,

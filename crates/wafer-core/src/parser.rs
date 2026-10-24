@@ -246,21 +246,21 @@ impl Parser<'_> {
     fn stmt(&mut self) -> PResult<Stmt> {
         let target = self.ident("a signal name")?;
         let select = if self.at(&Tok::LBracket) { Some(self.select()?) } else { None };
-        if self.at(&Tok::Arrow) {
+        let drive = self.eat(&Tok::Arrow);
+        if !drive {
+            self.expect(&Tok::Eq, "`=` or `<-`")?;
+        }
+        let is_call = matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::LParen;
+        if drive && !is_call {
             self.diags.push(
-                Diagnostic::error(self.span(), "shared wires (`<-`) aren't supported yet")
-                    .note("they arrive in Phase 2 along with tri-state drivers"),
+                Diagnostic::error(self.span(), "`<-` needs a gate or chip on its right")
+                    .note("like `data <- TriBuf(x, en)`: each `<-` line adds one driver to a shared wire"),
             );
             return Err(());
         }
-        self.expect(&Tok::Eq, "`=`")?;
-        let value = if matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::LParen {
-            StmtValue::Call(self.call()?)
-        } else {
-            StmtValue::Expr(self.expr()?)
-        };
+        let value = if is_call { StmtValue::Call(self.call()?) } else { StmtValue::Expr(self.expr()?) };
         let span = target.span.to(self.prev_span());
-        Ok(Stmt { target, select, value, span })
+        Ok(Stmt { target, select, value, drive, span })
     }
 
     fn call(&mut self) -> PResult<Call> {
@@ -351,7 +351,7 @@ impl Parser<'_> {
     fn test(&mut self) -> PResult<TestDef> {
         let keyword = self.bump().span;
         let chip = self.block_header("the name of the chip to test")?;
-        let mut test = TestDef { chip, header: None, rows: Vec::new(), span: keyword };
+        let mut test = TestDef { chip, header: None, steps: Vec::new(), span: keyword };
         loop {
             self.skip_newlines();
             match self.peek() {
@@ -376,12 +376,92 @@ impl Parser<'_> {
         }
     }
 
+    /// A test line holds one row or step, or several steps joined by `;`.
     fn test_line(&mut self, test: &mut TestDef, line: &[Token]) {
+        for part in line.split(|t| t.tok == Tok::Semi).filter(|p| !p.is_empty()) {
+            match &part[0].tok {
+                Tok::Ident(word) if matches!(word.as_str(), "set" | "tick" | "expect") => {
+                    let word = word.clone();
+                    if let Some(step) = self.test_step(&word, part) {
+                        test.steps.push(step);
+                    }
+                }
+                _ => self.test_row(test, part),
+            }
+        }
+    }
+
+    fn test_step(&mut self, word: &str, part: &[Token]) -> Option<TestStep> {
+        let span = part[0].span.to(part[part.len() - 1].span);
+        if word == "tick" {
+            let count = match part {
+                [_] => 1,
+                [_, Token { tok: Tok::Number { value, .. }, .. }] if (1..=1_000_000).contains(value) => *value,
+                _ => {
+                    self.diags.push(
+                        Diagnostic::error(span, "`tick` takes an optional count")
+                            .note("like `tick` or `tick 10` (up to a million)"),
+                    );
+                    return None;
+                }
+            };
+            return Some(TestStep::Tick { count, span });
+        }
+        // `set a = 1, b = 0` / `expect y = 0x2A`
+        let mut values = Vec::new();
+        let mut rest = &part[1..];
+        loop {
+            match rest {
+                [Token { tok: Tok::Ident(name), span: name_span }, Token { tok: Tok::Eq, .. }, value, tail @ ..] => {
+                    let ident = Ident { name: name.clone(), span: *name_span };
+                    values.push((ident, self.test_value(value)?));
+                    match tail {
+                        [] => break,
+                        [Token { tok: Tok::Comma, .. }, more @ ..] if !more.is_empty() => rest = more,
+                        _ => {
+                            self.diags.push(Diagnostic::error(tail[0].span, "expected `,` or the end of the step"));
+                            return None;
+                        }
+                    }
+                }
+                _ => {
+                    let at = rest.first().map_or(span, |t| t.span);
+                    self.diags.push(
+                        Diagnostic::error(at, format!("expected `name = value` after `{word}`"))
+                            .note(format!("like `{word} a = 1, b = 0x2A`")),
+                    );
+                    return None;
+                }
+            }
+        }
+        Some(if word == "set" { TestStep::Set { values, span } } else { TestStep::Expect { values, span } })
+    }
+
+    fn test_value(&mut self, t: &Token) -> Option<TestValue> {
+        let kind = match &t.tok {
+            Tok::Number { value, digits_width } => {
+                TestValueKind::Number(Literal { value: *value, digits_width: *digits_width })
+            }
+            Tok::Ident(name) if name == "x" || name == "X" => TestValueKind::X,
+            Tok::Ident(name) if name == "z" || name == "Z" => TestValueKind::Z,
+            Tok::Star => TestValueKind::Any,
+            other => {
+                self.diags.push(Diagnostic::error(
+                    t.span,
+                    format!("expected a value (a number, X, Z or *), found {}", other.describe()),
+                ));
+                return None;
+            }
+        };
+        Some(TestValue { kind, span: t.span })
+    }
+
+    fn test_row(&mut self, test: &mut TestDef, line: &[Token]) {
         let span = line[0].span.to(line[line.len() - 1].span);
         let bars: Vec<usize> = (0..line.len()).filter(|&i| line[i].tok == Tok::Pipe).collect();
         let &[bar] = bars.as_slice() else {
             let message = if bars.is_empty() {
-                "a test row needs a `|` between the inputs and the outputs"
+                "a test row needs a `|` between the inputs and the outputs (or start the line with set, tick or expect)"
             } else {
                 "a test row can only have one `|`"
             };
@@ -392,7 +472,7 @@ impl Parser<'_> {
 
         let is_value_word = |name: &str| matches!(name, "x" | "X" | "z" | "Z");
         let is_header = test.header.is_none()
-            && test.rows.is_empty()
+            && !test.steps.iter().any(|s| matches!(s, TestStep::Row(_)))
             && line.iter().all(|t| matches!(t.tok, Tok::Ident(_) | Tok::Pipe))
             && line.iter().any(|t| matches!(&t.tok, Tok::Ident(n) if !is_value_word(n)));
         if is_header {
@@ -409,32 +489,9 @@ impl Parser<'_> {
             return;
         }
 
-        let mut values = |tokens: &[Token]| -> Vec<TestValue> {
-            tokens
-                .iter()
-                .filter_map(|t| {
-                    let kind = match &t.tok {
-                        Tok::Number { value, digits_width } => {
-                            TestValueKind::Number(Literal { value: *value, digits_width: *digits_width })
-                        }
-                        Tok::Ident(name) if name == "x" || name == "X" => TestValueKind::X,
-                        Tok::Ident(name) if name == "z" || name == "Z" => TestValueKind::Z,
-                        Tok::Star => TestValueKind::Any,
-                        other => {
-                            self.diags.push(Diagnostic::error(
-                                t.span,
-                                format!("expected a value (a number, X, Z or *), found {}", other.describe()),
-                            ));
-                            return None;
-                        }
-                    };
-                    Some(TestValue { kind, span: t.span })
-                })
-                .collect()
-        };
-        let inputs = values(inputs);
-        let outputs = values(outputs);
-        test.rows.push(TestRow { inputs, outputs, span });
+        let inputs = inputs.iter().filter_map(|t| self.test_value(t)).collect();
+        let outputs = outputs.iter().filter_map(|t| self.test_value(t)).collect();
+        test.steps.push(TestStep::Row(TestRow { inputs, outputs, span }));
     }
 }
 
@@ -468,7 +525,7 @@ mod tests {
         assert_eq!(chip.stmts.len(), 2);
         let StmtValue::Call(call) = &chip.stmts[1].value else { panic!() };
         assert_eq!(call.args[1].name.as_ref().unwrap().name, "b");
-        assert_eq!(file.tests[0].rows.len(), 2);
+        assert_eq!(file.tests[0].steps.len(), 2);
     }
 
     #[test]
@@ -487,7 +544,19 @@ mod tests {
         assert_eq!(file.chips[0].inputs[0].width, 4);
         let test = &file.tests[0];
         assert_eq!(test.header.as_ref().unwrap().outputs.len(), 2);
-        assert!(matches!(test.rows[1].outputs[0].kind, TestValueKind::Any));
+        let TestStep::Row(row) = &test.steps[1] else { panic!("a row") };
+        assert!(matches!(row.outputs[0].kind, TestValueKind::Any));
+    }
+
+    #[test]
+    fn parses_test_steps() {
+        let file =
+            parse_ok("chip A {\n in r\n out y\n y = Not(r)\n}\ntest A {\n set r = 1\n tick; expect y = 0\n tick 5\n}");
+        let steps = &file.tests[0].steps;
+        assert_eq!(steps.len(), 4);
+        assert!(matches!(steps[1], TestStep::Tick { count: 1, .. }));
+        assert!(matches!(&steps[2], TestStep::Expect { values, .. } if values[0].0.name == "y"));
+        assert!(matches!(steps[3], TestStep::Tick { count: 5, .. }));
     }
 
     #[test]
@@ -495,6 +564,6 @@ mod tests {
         let errors = parse_errors("chip A {\n  in a\n  out y\n  y = And(Not(a), a)\n  y Or(a, a)\n}");
         assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(errors[0].contains("nested"));
-        assert!(errors[1].contains("expected `=`, found `Or`"));
+        assert!(errors[1].contains("expected `=` or `<-`, found `Or`"), "{errors:?}");
     }
 }

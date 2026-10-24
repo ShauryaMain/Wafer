@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 
 use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat};
 use egui::{Event, FontId, Key, Modifiers, RichText, Stroke};
-use wafer_core::ast::StmtValue;
 use wafer_core::complete::{Completions, Suggestion, complete};
 
 use crate::canvas::Canvas;
@@ -358,9 +357,13 @@ fn node_spans(ws: &Workspace, chip: &str) -> Vec<(String, usize, usize)> {
     for decl in &def.outputs {
         spans.push((format!("out:{}", decl.name.name), decl.span.start, decl.span.end));
     }
-    for stmt in &def.stmts {
-        if let StmtValue::Call(_) = stmt.value {
-            spans.push((stmt.target.name.clone(), stmt.span.start, stmt.span.end));
+    // Boxes go through the checker, which knows each one's line (a
+    // shared-wire driver's line is named after the wire, not the box).
+    if let Some(info) = ws.design.chips.get(chip) {
+        for inst in &info.instances {
+            if let Some(stmt) = def.stmts.get(inst.line) {
+                spans.push((inst.name.clone(), stmt.span.start, stmt.span.end));
+            }
         }
     }
     spans

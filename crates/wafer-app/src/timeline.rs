@@ -102,7 +102,10 @@ pub fn ui(ui: &mut egui::Ui, view: &mut TimelineView, sim: &mut SimRunner, scope
             }
         }
     }
-    let content_h = rows.len() as f32 * LANE_H;
+    // Chips with flip-flops or memory get a clock lane on top.
+    let clocked = sim.has_clock();
+    let first_row = usize::from(clocked);
+    let content_h = (rows.len() + first_row) as f32 * LANE_H;
     let max_scroll = (content_h - wave.height()).max(0.0);
     if response.hovered() {
         let (scroll, zoom, pointer) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.pointer.hover_pos()));
@@ -177,9 +180,48 @@ pub fn ui(ui: &mut egui::Ui, view: &mut TimelineView, sim: &mut SimRunner, scope
     let shown = sim.cursor.unwrap_or(now);
     let lanes = painter.with_clip_rect(Rect::from_min_max(pos2(rect.min.x, wave.min.y), rect.max));
     let lane_waves = lanes.with_clip_rect(wave);
+    if clocked {
+        let top = wave.min.y - view.scroll;
+        let lane = Rect::from_min_size(pos2(wave.min.x, top), vec2(wave.width(), LANE_H));
+        lanes.line_segment([pos2(rect.min.x, lane.max.y), pos2(rect.max.x, lane.max.y)], Stroke::new(1.0, theme::GRID));
+        lanes.text(
+            pos2(rect.min.x + 8.0, lane.center().y),
+            Align2::LEFT_CENTER,
+            "clk",
+            FontId::monospace(12.0),
+            theme::BUS,
+        );
+        let count = trace.ticks.iter().filter(|&&t| t <= shown).count();
+        lanes.text(
+            pos2(rect.min.x + LABEL_W - 8.0, lane.center().y),
+            Align2::RIGHT_CENTER,
+            format!("tick {count}"),
+            FontId::monospace(12.0),
+            theme::MUTED,
+        );
+        // High from each tick until halfway to the next.
+        let mut level_from = trace.start;
+        let mut previous = None;
+        for (j, &t) in trace.ticks.iter().enumerate() {
+            let next = trace.ticks.get(j + 1).copied().unwrap_or(now.max(t) + 4);
+            let fall = t + ((next - t) / 2).max(1);
+            bit_segment(&lane_waves, lane, x_of(level_from as f64), x_of(t as f64), Logic::Zero, previous);
+            bit_segment(&lane_waves, lane, x_of(t as f64), x_of(fall as f64), Logic::One, Some(Logic::Zero));
+            level_from = fall;
+            previous = Some(Logic::One);
+        }
+        bit_segment(&lane_waves, lane, x_of(level_from as f64), x_of(now as f64 + 1.0), Logic::Zero, previous);
+        for &t in &trace.ticks {
+            let x = x_of(t as f64);
+            waves.line_segment(
+                [pos2(x, lane.max.y), pos2(x, rect.max.y)],
+                Stroke::new(1.0, theme::BUS.gamma_multiply(0.18)),
+            );
+        }
+    }
     for (row, &i) in rows.iter().enumerate() {
         let signal = &trace.signals[i];
-        let top = wave.min.y + row as f32 * LANE_H - view.scroll;
+        let top = wave.min.y + (row + first_row) as f32 * LANE_H - view.scroll;
         if top + LANE_H < wave.min.y || top > wave.max.y {
             continue;
         }

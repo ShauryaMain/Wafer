@@ -39,6 +39,8 @@ pub struct Stmt {
     pub target: Ident,
     pub select: Option<Select>,
     pub value: StmtValue,
+    /// `target <- Chip(...)`: one of several drivers of a shared wire.
+    pub drive: bool,
     pub span: Span,
 }
 
@@ -118,8 +120,29 @@ pub struct TestDef {
     pub chip: Ident,
     /// An optional first row naming the columns, like `a b | sum`.
     pub header: Option<TestHeader>,
-    pub rows: Vec<TestRow>,
+    /// Truth-table rows and `set` / `tick` / `expect` steps, in order.
+    pub steps: Vec<TestStep>,
     pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum TestStep {
+    Row(TestRow),
+    /// `set a = 1, b = 0x2A`
+    Set {
+        values: Vec<(Ident, TestValue)>,
+        span: Span,
+    },
+    /// `tick` or `tick 10`
+    Tick {
+        count: u64,
+        span: Span,
+    },
+    /// `expect count = 3, cout = *`
+    Expect {
+        values: Vec<(Ident, TestValue)>,
+        span: Span,
+    },
 }
 
 #[derive(Clone, Debug)]

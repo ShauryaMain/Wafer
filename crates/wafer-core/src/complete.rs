@@ -94,7 +94,7 @@ pub fn complete(design: &Design, text: &str, cursor: usize) -> Completions {
                     items.extend(signals(design, info));
                 }
                 items.extend(named_args(design, callee));
-            } else if matches!(ctx.prev, Some(Tok::Eq)) {
+            } else if matches!(ctx.prev, Some(Tok::Eq | Tok::Arrow)) {
                 items.extend(callees(design, chip));
                 if let Some(info) = info {
                     items.extend(signals(design, info));

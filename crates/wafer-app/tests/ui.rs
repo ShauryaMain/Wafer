@@ -56,7 +56,7 @@ fn shot(harness: &mut Harness<'static, WaferApp>, name: &str) {
 fn shows_the_example_project() {
     let dir = example_project("overview");
     let mut h = open(&dir);
-    assert_eq!(h.state().state.canvas.chip, "Add4", "opens the most built-up chip");
+    assert_eq!(h.state().state.canvas.chip, "Counter8", "opens the most built-up chip");
     h.state_mut().state.open_chip("HalfAdder");
     h.run_steps(4);
     shot(&mut h, "overview");
@@ -336,6 +336,7 @@ fn rose_at(h: &Harness<'static, WaferApp>, path: &str) -> u64 {
 fn watches_a_carry_ripple_in_the_timeline() {
     let dir = example_project("ripple");
     let mut h = open(&dir);
+    h.state_mut().state.open_chip("Add4");
     h.state_mut().show_tab(Tab::Timeline);
     h.run_steps(2);
     let sim = &mut h.state_mut().state.sim;
@@ -519,4 +520,53 @@ fn makes_a_chip_and_looks_inside_it() {
     h.run_steps(3);
     assert_eq!(chip_text(&dir, "Xor.chip"), original);
     assert!(!dir.join("Part.chip").exists());
+}
+
+fn count(h: &Harness<'static, WaferApp>) -> Option<u64> {
+    h.state().state.sim.read("count").and_then(|bits| wafer_core::logic::bits_to_u64(&bits))
+}
+
+#[test]
+fn counts_with_the_clock() {
+    let dir = example_project("counter");
+    let mut h = open(&dir);
+    h.state_mut().state.open_chip("Counter8");
+    h.state_mut().show_tab(Tab::Timeline);
+    h.run_steps(3);
+    assert!(h.state().state.sim.has_clock());
+    assert_eq!(count(&h), None, "flip-flops start unknown");
+
+    // Click reset on, then press T for one tick.
+    let reset = node_center(&mut h, "in:reset");
+    click(&mut h, reset);
+    h.key_press(Key::T);
+    h.run_steps(2);
+    assert_eq!(count(&h), Some(0));
+
+    // Reset off, en on, and five ticks with the T key.
+    click(&mut h, reset);
+    let en = node_center(&mut h, "in:en");
+    click(&mut h, en);
+    for _ in 0..5 {
+        h.key_press(Key::T);
+        h.run_steps(1);
+    }
+    h.run_steps(1);
+    assert_eq!(count(&h), Some(5));
+
+    // The Tick button does the same.
+    h.get_by_label("Tick").click();
+    h.run_steps(2);
+    assert_eq!(count(&h), Some(6));
+    assert_eq!(h.state().state.sim.ticks(), 7);
+    shot(&mut h, "counter");
+
+    // Auto ticks the clock by itself: about 20 ticks in a second at 20 Hz.
+    h.state_mut().state.sim.clock_hz = 20.0;
+    h.get_by_label("Auto").click();
+    h.run_steps(60);
+    let counted = count(&h).unwrap();
+    assert!((20..=30).contains(&counted), "counted to {counted}");
+    let ticks = h.state().state.sim.trace.as_ref().unwrap().ticks.len();
+    assert!(ticks >= 20, "the timeline saw {ticks} ticks");
 }

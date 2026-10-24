@@ -4,9 +4,9 @@ A "Blender for computer chips": design digital chips from gates, simulate
 them one gate delay at a time, and test them. See [PLANNING.md](PLANNING.md)
 for the vision, the decisions so far, and the roadmap.
 
-Phase 1 is done: the engine and `wafer` command (1a), the desktop app and
-canvas (1b), the waveform timeline and code panel (1c), and chips inside
-chips (1d).
+Phases 1 and 2 are done: the engine, `wafer` command and desktop app with
+its canvas, timeline, code panel and chips inside chips; then clocks,
+flip-flops, memory and shared buses, up to an 8-bit counter.
 
 ## The app
 
@@ -33,6 +33,7 @@ anything else changes them, so you can edit text and boxes side by side.
 | X or Delete | Delete the selected boxes or wire |
 | F | Frame everything |
 | Space / → | Play-pause / step one gate delay |
+| T | One clock tick (or turn on Auto in the top bar) |
 | Cmd+Z / Cmd+Shift+Z | Undo / redo |
 | Two-finger drag / pinch | Pan / zoom |
 
@@ -88,9 +89,26 @@ test HalfAdder {
 }
 ```
 
-The built-in gates are Nand, And, Or, Not, Xor, Nor and Xnor. If you
-write a chip with the same name as a built-in (like `chips/Xor.chip`), yours
-replaces it across the project, and `wafer test` checks that the two agree.
+The built-in parts are the gates Nand, And, Or, Not, Xor, Nor and Xnor,
+plus `Mux(a, b, sel)`, `TriBuf(a, en)`, `Dff(d)` (flip-flops, which change
+only on a clock tick) and `Ram(addr, data, write)`. If you write a chip with
+the same name as a built-in (like `chips/Xor.chip`), yours replaces it across
+the project, and `wafer test` checks that the two agree.
+
+Several drivers can share a bus with `bus <- TriBuf(x, en)` lines. Tests can
+be truth tables or steps:
+
+```
+test Counter8 {
+  set reset = 1
+  tick
+  expect count = 0
+  set reset = 0, en = 1
+  tick 15
+  expect count = 15
+}
+```
+
 Buses look like `in a[8]`, with `a[0]` for the lowest bit, `a[7:4]` for a
 slice, and `{hi, lo}` to join buses. PLANNING.md has the full format.
 
@@ -101,4 +119,4 @@ slice, and `{hi, lo}` to join buses. PLANNING.md has the full format.
 | `crates/wafer-core` | The engine: parser, checker, netlist, simulator, test runner, schematic layout and SVG drawing. No UI code. |
 | `crates/wafer-cli` | The `wafer` command |
 | `crates/wafer-app` | The desktop app: canvas, panels, live simulation. UI tests in `tests/ui.rs` drive it with simulated input. |
-| `chips/` | Our chips: gates built from Nand up to a 4-bit adder and a latch |
+| `chips/` | Our chips: gates built from Nand, adders, a latch, a register, an 8-bit counter, a shared bus and some memory |

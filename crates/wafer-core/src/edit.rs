@@ -149,8 +149,7 @@ pub fn extract_chip(
         return Err("select the boxes to put in the new chip first".into());
     }
     let inside: std::collections::HashSet<&str> = picked.iter().map(|&k| info.instances[k].name.as_str()).collect();
-    let stmt_of =
-        |name: &str| def.stmts.iter().find(|s| s.target.name == name && matches!(s.value, StmtValue::Call(_)));
+    let stmt_of = |name: &str| info.instances.iter().find(|i| i.name == name).and_then(|i| def.stmts.get(i.line));
 
     // Outside signals the boxes read become inputs: (as written outside, port name, width).
     let mut inputs: Vec<(String, String, usize)> = Vec::new();
@@ -272,8 +271,9 @@ pub fn extract_chip(
             ed.remove_stmt(stmt);
         }
     }
-    for stmt in &def.stmts {
-        if inside.contains(stmt.target.name.as_str()) && matches!(stmt.value, StmtValue::Call(_)) {
+    let moved_lines: Vec<usize> = picked.iter().map(|&k| info.instances[k].line).collect();
+    for (line, stmt) in def.stmts.iter().enumerate() {
+        if moved_lines.contains(&line) {
             continue;
         }
         let exprs: Vec<&Expr> = match &stmt.value {
@@ -379,12 +379,15 @@ impl<'a> Editor<'a> {
         &self.text[expr.span.start..expr.span.end]
     }
 
+    /// The line a box is written on. (A shared-wire driver's line is named
+    /// after the wire, not the box, so this goes through the checker.)
     fn call_stmt(&self, name: &str) -> Option<(&'a ast::Stmt, &'a ast::Call)> {
         let def: &'a ast::ChipDef = self.def;
-        def.stmts.iter().find_map(|stmt| match &stmt.value {
-            StmtValue::Call(call) if stmt.target.name == name => Some((stmt, call)),
+        let inst = self.info.instances.iter().find(|i| i.name == name)?;
+        match def.stmts.get(inst.line) {
+            Some(stmt @ ast::Stmt { value: StmtValue::Call(call), .. }) => Some((stmt, call)),
             _ => None,
-        })
+        }
     }
 
     /// The callee's input ports and what's wired to each, as text.
@@ -492,16 +495,15 @@ impl<'a> Editor<'a> {
     /// Disconnects every pin that reads `name`, and removes connection
     /// lines that read it.
     fn disconnect_readers(&mut self, name: &str, skip: Option<&str>) -> Result<(), String> {
-        for stmt in &self.def.stmts {
-            if Some(stmt.target.name.as_str()) == skip {
-                continue;
-            }
+        for (line, stmt) in self.def.stmts.iter().enumerate() {
             match &stmt.value {
                 StmtValue::Call(_) => {
-                    let Ok((ports, args)) = self.call_args(&stmt.target.name) else { continue };
+                    let Some(inst) = self.info.instances.iter().find(|i| i.line == line) else { continue };
+                    if Some(inst.name.as_str()) == skip {
+                        continue;
+                    }
+                    let Ok((ports, args)) = self.call_args(&inst.name) else { continue };
                     let reads = |e: &Option<String>| e.is_some();
-                    let inst = self.info.instances.iter().find(|i| i.name == stmt.target.name);
-                    let Some(inst) = inst else { continue };
                     let kept: Vec<Option<String>> = inst
                         .inputs
                         .iter()
@@ -512,7 +514,7 @@ impl<'a> Editor<'a> {
                         })
                         .collect();
                     if kept.iter().filter(|a| reads(a)).count() != args.iter().filter(|a| reads(a)).count() {
-                        let target = stmt.target.name.clone();
+                        let target = inst.name.clone();
                         self.rewrite_call(&target, &ports, &kept);
                     }
                 }

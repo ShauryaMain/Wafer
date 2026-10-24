@@ -15,6 +15,8 @@ pub struct Trace {
     pub end: u64,
     /// Steps where an input was changed by hand.
     pub marks: Vec<u64>,
+    /// Steps where the clock ticked.
+    pub ticks: Vec<u64>,
     /// For each net, the traced signals that include it.
     readers: Vec<Vec<u32>>,
     by_path: std::collections::HashMap<String, usize>,
@@ -42,7 +44,17 @@ impl Trace {
         let changes = signals.iter().map(|s| vec![(time, sim.values(&s.nets))]).collect();
         let recorded = signals.len();
         let by_path = signals.iter().enumerate().map(|(i, s)| (s.path.clone(), i)).collect();
-        Trace { signals, changes, start: time, end: time, marks: Vec::new(), readers, by_path, recorded }
+        Trace {
+            signals,
+            changes,
+            start: time,
+            end: time,
+            marks: Vec::new(),
+            ticks: Vec::new(),
+            readers,
+            by_path,
+            recorded,
+        }
     }
 
     /// Records whatever changed among `nets` (as returned by
@@ -67,6 +79,11 @@ impl Trace {
         for i in 0..self.signals.len() {
             self.update(sim, i, time);
         }
+        self.end = self.end.max(time);
+    }
+
+    pub fn tick(&mut self, time: u64) {
+        self.ticks.push(time);
         self.end = self.end.max(time);
     }
 
@@ -121,6 +138,7 @@ impl Trace {
             self.recorded += history.len();
         }
         self.marks.retain(|&m| m >= cutoff);
+        self.ticks.retain(|&t| t >= cutoff);
         self.start = cutoff;
     }
 }

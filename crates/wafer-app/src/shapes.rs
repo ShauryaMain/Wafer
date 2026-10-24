@@ -8,17 +8,21 @@ use wafer_core::GateKind;
 pub struct GateShape {
     /// The closed outline of the gate body.
     pub body: Vec<Pos2>,
-    /// Xor's extra curve behind the body.
-    pub extra: Option<Vec<Pos2>>,
-    /// Where input stubs meet the body.
-    pub back_x: f32,
+    /// Extra lines: Xor's second curve, TriBuf's enable lead.
+    pub extra: Vec<Vec<Pos2>>,
+    /// Where each input stub meets the body, as (y, x).
+    pub stubs: Vec<(f32, f32)>,
     /// The rightmost point of the body, where the output (or bubble) starts.
     pub tip: f32,
     pub bubble: bool,
+    /// Small labels inside, like a Mux's 0, 1 and s.
+    pub labels: Vec<(Pos2, &'static str)>,
 }
 
 pub fn gate_shape(kind: GateKind) -> GateShape {
     let bubble = matches!(kind, GateKind::Nand | GateKind::Nor | GateKind::Xnor | GateKind::Not);
+    let two = |x: f32| vec![(15.0, x), (35.0, x)];
+    let plain = |body, stubs, tip| GateShape { body, extra: Vec::new(), stubs, tip, bubble, labels: Vec::new() };
     match kind {
         GateKind::And | GateKind::Nand => {
             let mut body = vec![pos2(0.0, 0.0), pos2(30.0, 0.0)];
@@ -27,25 +31,30 @@ pub fn gate_shape(kind: GateKind) -> GateShape {
                 body.push(pos2(30.0 + 25.0 * angle.cos(), 25.0 + 25.0 * angle.sin()));
             }
             body.extend([pos2(30.0, 50.0), pos2(0.0, 50.0)]);
-            GateShape { body, extra: None, back_x: 0.0, tip: 55.0, bubble }
+            plain(body, two(0.0), 55.0)
         }
-        GateKind::Or | GateKind::Nor => {
-            GateShape { body: or_body(0.0, 14.0, 36.0, 55.0), extra: None, back_x: 6.0, tip: 55.0, bubble }
-        }
+        GateKind::Or | GateKind::Nor => plain(or_body(0.0, 14.0, 36.0, 55.0), two(6.0), 55.0),
         GateKind::Xor | GateKind::Xnor => GateShape {
-            body: or_body(6.0, 19.0, 38.0, 56.0),
-            extra: Some(quad(pos2(0.0, 0.0), pos2(13.0, 25.0), pos2(0.0, 50.0))),
-            back_x: 11.5,
-            tip: 56.0,
-            bubble,
+            extra: vec![quad(pos2(0.0, 0.0), pos2(13.0, 25.0), pos2(0.0, 50.0))],
+            ..plain(or_body(6.0, 19.0, 38.0, 56.0), two(11.5), 56.0)
         },
-        GateKind::Not => GateShape {
-            body: vec![pos2(4.0, 7.0), pos2(50.0, 25.0), pos2(4.0, 43.0)],
-            extra: None,
-            back_x: 4.0,
-            tip: 50.0,
-            bubble,
+        GateKind::Not => plain(vec![pos2(4.0, 7.0), pos2(50.0, 25.0), pos2(4.0, 43.0)], vec![(25.0, 4.0)], 50.0),
+        GateKind::Mux => GateShape {
+            labels: vec![(pos2(10.0, 12.0), "0"), (pos2(10.0, 25.0), "1"), (pos2(10.0, 38.0), "s")],
+            ..plain(
+                vec![pos2(6.0, 0.0), pos2(54.0, 10.0), pos2(54.0, 40.0), pos2(6.0, 50.0)],
+                vec![(12.0, 6.0), (25.0, 6.0), (38.0, 6.0)],
+                54.0,
+            )
         },
+        GateKind::TriBuf => GateShape {
+            extra: vec![vec![pos2(0.0, 45.0), pos2(28.0, 45.0), pos2(28.0, 35.0)]],
+            ..plain(vec![pos2(6.0, 5.0), pos2(50.0, 25.0), pos2(6.0, 45.0)], vec![(25.0, 6.0)], 50.0)
+        },
+        // Dff and Ram are drawn as boxes; this is only a fallback.
+        GateKind::Dff | GateKind::Ram => {
+            plain(vec![pos2(0.0, 0.0), pos2(66.0, 0.0), pos2(66.0, 50.0), pos2(0.0, 50.0)], Vec::new(), 66.0)
+        }
     }
 }
 

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::ast::{self, Expr, ExprKind, Select, StmtValue, TestValueKind};
 use crate::diag::{Diagnostic, Span, suggest};
-use crate::gate::GateKind;
+use crate::gate::{GateKind, PortWidth};
 use crate::logic::{Logic, bits_from_u64};
 use crate::project::Project;
 
@@ -59,15 +59,21 @@ pub struct Instance {
     /// The output or wire this box drives directly, when its line is named
     /// after one (`sum = Xor(a, b)` where `sum` is an output).
     pub drives: Option<Name>,
+    /// One of several drivers of a shared wire (`data <- TriBuf(x, en)`).
+    pub shared: bool,
+    /// Which statement in the chip it comes from.
+    pub line: usize,
     pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Callee {
-    /// A built-in gate, repeated once per bit when its inputs are buses.
+    /// A built-in part, repeated once per bit when its inputs are buses.
+    /// `addr` is a `Ram`'s address width (0 for everything else).
     Gate {
         kind: GateKind,
         width: usize,
+        addr: usize,
     },
     Chip(String),
     Unknown,
@@ -92,19 +98,31 @@ pub struct Signature {
 pub struct TestInfo {
     pub chip: String,
     pub span: Span,
-    /// The chip input port for each input column.
-    pub input_ports: Vec<usize>,
-    /// The chip output port for each output column.
-    pub output_ports: Vec<usize>,
-    pub rows: Vec<TestRowInfo>,
+    pub steps: Vec<TestStepInfo>,
 }
 
+/// One checked test step. Inputs are (input port, value); checks are
+/// (signal path, expected value), where `None` means "don't care".
 #[derive(Clone, Debug)]
-pub struct TestRowInfo {
-    pub span: Span,
-    pub inputs: Vec<Vec<Logic>>,
-    /// `None` means "don't care".
-    pub outputs: Vec<Option<Vec<Logic>>>,
+pub enum TestStepInfo {
+    /// A truth-table row: set the inputs, settle, check the outputs.
+    Row {
+        span: Span,
+        inputs: Vec<(usize, Vec<Logic>)>,
+        checks: Vec<(String, Option<Vec<Logic>>)>,
+    },
+    Set {
+        span: Span,
+        inputs: Vec<(usize, Vec<Logic>)>,
+    },
+    Tick {
+        span: Span,
+        count: u64,
+    },
+    Expect {
+        span: Span,
+        checks: Vec<(String, Option<Vec<Logic>>)>,
+    },
 }
 
 impl Design {
@@ -153,7 +171,7 @@ impl Design {
 
     pub fn signature(&self, callee: &Callee) -> Signature {
         match callee {
-            Callee::Gate { kind, width } => gate_signature(*kind, *width),
+            Callee::Gate { kind, width, addr } => gate_signature(*kind, *width, *addr),
             Callee::Chip(name) => {
                 let info = &self.chips[name];
                 let ports = |ports: &[Port]| ports.iter().map(|p| (p.name.clone(), p.width)).collect();
@@ -201,9 +219,14 @@ impl Design {
     }
 }
 
-fn gate_signature(kind: GateKind, width: usize) -> Signature {
+fn gate_signature(kind: GateKind, width: usize, addr: usize) -> Signature {
+    let port = |i: usize| match kind.port_width(i) {
+        PortWidth::Bus => width,
+        PortWidth::Bit => 1,
+        PortWidth::Address => addr,
+    };
     Signature {
-        inputs: kind.inputs().iter().map(|&n| (n.to_string(), width)).collect(),
+        inputs: kind.inputs().iter().enumerate().map(|(i, &n)| (n.to_string(), port(i))).collect(),
         outputs: vec![("out".to_string(), width)],
     }
 }
@@ -266,14 +289,46 @@ impl BodyCheck<'_> {
 
     fn check(&mut self, def: &ast::ChipDef) {
         self.wire_widths = self.info.wires.iter().map(|w| Some(w.width)).collect();
-        for stmt in &def.stmts {
-            self.declare_stmt(stmt);
+        for (line, stmt) in def.stmts.iter().enumerate() {
+            if stmt.drive {
+                self.declare_driver(line, stmt);
+            } else {
+                self.declare_stmt(line, stmt);
+            }
         }
         self.infer_widths();
         self.validate();
     }
 
-    fn declare_stmt(&mut self, stmt: &ast::Stmt) {
+    /// `data <- TriBuf(x, en)`: adds a driver to a shared wire. Drivers are
+    /// named after the wire: `data_d1`, `data_d2`, ...
+    fn declare_driver(&mut self, line: usize, stmt: &ast::Stmt) {
+        let target = &stmt.target;
+        let StmtValue::Call(call) = &stmt.value else { return };
+        if let Some(select) = stmt.select {
+            self.error(
+                Diagnostic::error(select.span, "a shared wire is driven whole")
+                    .note(format!("write `{} <- ...`; each driver drives every bit", target.name)),
+            );
+            return;
+        }
+        let Some(driven @ (Name::Output(_) | Name::Wire(_))) = self.info.names.get(&target.name).copied() else {
+            self.error(
+                Diagnostic::error(target.span, format!("`{}` has to be declared before it can be shared", target.name))
+                    .note(format!("add `wire {}[N]` to the chip (or make it an output)", target.name)),
+            );
+            return;
+        };
+        let n = self.info.instances.iter().filter(|i| i.shared && i.drives == Some(driven)).count() + 1;
+        let name = format!("{}_d{n}", target.name);
+        let mut instance = self.new_instance(call, &name, Some(driven), stmt.span, line);
+        instance.shared = true;
+        self.info.instances.push(instance);
+        let index = self.info.instances.len() - 1;
+        self.info.names.insert(name, Name::Instance(index));
+    }
+
+    fn declare_stmt(&mut self, line: usize, stmt: &ast::Stmt) {
         let target = &stmt.target;
         let existing = self.info.names.get(&target.name).copied();
         match (&stmt.value, existing) {
@@ -297,7 +352,7 @@ impl BodyCheck<'_> {
                     ));
                     return;
                 }
-                let instance = self.new_instance(call, &target.name, Some(driven), stmt.span);
+                let instance = self.new_instance(call, &target.name, Some(driven), stmt.span, line);
                 self.info.instances.push(instance);
             }
             (StmtValue::Call(call), None) => {
@@ -305,7 +360,7 @@ impl BodyCheck<'_> {
                     self.undeclared_bus(target);
                     return;
                 }
-                let instance = self.new_instance(call, &target.name, None, stmt.span);
+                let instance = self.new_instance(call, &target.name, None, stmt.span, line);
                 self.info.instances.push(instance);
                 let index = self.info.instances.len() - 1;
                 self.info.names.insert(target.name.clone(), Name::Instance(index));
@@ -340,12 +395,19 @@ impl BodyCheck<'_> {
         );
     }
 
-    fn new_instance(&mut self, call: &ast::Call, name: &str, drives: Option<Name>, span: Span) -> Instance {
+    fn new_instance(
+        &mut self,
+        call: &ast::Call,
+        name: &str,
+        drives: Option<Name>,
+        span: Span,
+        line: usize,
+    ) -> Instance {
         let chip = &call.chip.name;
         let (callee, ports): (Callee, Vec<String>) = if let Some(sig) = self.sigs.get(chip) {
             (Callee::Chip(chip.clone()), sig.inputs.iter().map(|(n, _)| n.clone()).collect())
         } else if let Some(kind) = GateKind::from_name(chip) {
-            (Callee::Gate { kind, width: 0 }, kind.inputs().iter().map(|n| n.to_string()).collect())
+            (Callee::Gate { kind, width: 0, addr: 0 }, kind.inputs().iter().map(|n| n.to_string()).collect())
         } else {
             let known = self.sigs.keys().map(String::as_str).chain(GateKind::ALL.iter().map(|g| g.name()));
             let mut d = Diagnostic::error(call.chip.span, format!("there's no chip named `{chip}`"));
@@ -353,7 +415,15 @@ impl BodyCheck<'_> {
                 d = d.label(format!("did you mean `{close}`?"));
             }
             self.error(d);
-            return Instance { name: name.into(), callee: Callee::Unknown, inputs: Vec::new(), drives, span };
+            return Instance {
+                name: name.into(),
+                callee: Callee::Unknown,
+                inputs: Vec::new(),
+                drives,
+                shared: false,
+                line,
+                span,
+            };
         };
 
         let mut slots: Vec<Option<Expr>> = vec![None; ports.len()];
@@ -406,7 +476,7 @@ impl BodyCheck<'_> {
                     .note("unconnected inputs read as Z"),
             );
         }
-        Instance { name: name.into(), callee, inputs: slots, drives, span }
+        Instance { name: name.into(), callee, inputs: slots, drives, shared: false, line, span }
     }
 
     /// Output ports of the box at `index` and their widths (`None` while a
@@ -457,12 +527,23 @@ impl BodyCheck<'_> {
         loop {
             let mut changed = false;
             for i in 0..self.info.instances.len() {
-                if let Callee::Gate { kind, width: 0 } = self.info.instances[i].callee {
-                    let found = self.info.instances[i].inputs.iter().flatten().find_map(|e| self.quiet_width(e, false));
-                    if let Some(width) = found {
-                        self.info.instances[i].callee = Callee::Gate { kind, width };
-                        changed = true;
-                    }
+                let Callee::Gate { kind, width, addr } = self.info.instances[i].callee else { continue };
+                // The part's width comes from its bus inputs; one-bit
+                // inputs like `sel` don't count.
+                let from = |want: PortWidth| {
+                    self.info.instances[i]
+                        .inputs
+                        .iter()
+                        .enumerate()
+                        .filter(|(p, _)| kind.port_width(*p) == want)
+                        .find_map(|(_, e)| e.as_ref().and_then(|e| self.quiet_width(e, false)))
+                };
+                let new_width = if width == 0 { from(PortWidth::Bus).unwrap_or(0) } else { width };
+                let new_addr =
+                    if kind == GateKind::Ram && addr == 0 { from(PortWidth::Address).unwrap_or(0) } else { addr };
+                if (new_width, new_addr) != (width, addr) {
+                    self.info.instances[i].callee = Callee::Gate { kind, width: new_width, addr: new_addr };
+                    changed = true;
                 }
             }
             for i in 0..self.info.assigns.len() {
@@ -480,24 +561,45 @@ impl BodyCheck<'_> {
         }
 
         for i in 0..self.info.instances.len() {
-            if let Callee::Gate { kind, width: 0 } = self.info.instances[i].callee {
-                // Every input is a number: use the widest one.
-                let inputs = &self.info.instances[i].inputs;
+            let Callee::Gate { kind, width, addr } = self.info.instances[i].callee else { continue };
+            // Ports given only numbers: use the widest number's width.
+            let guess = |want: PortWidth| {
+                let inputs: Vec<Option<&Expr>> = self.info.instances[i]
+                    .inputs
+                    .iter()
+                    .enumerate()
+                    .filter(|(p, _)| kind.port_width(*p) == want)
+                    .map(|(_, e)| e.as_ref())
+                    .collect();
                 let all_literals = inputs.iter().flatten().all(|e| matches!(e.kind, ExprKind::Literal(_)));
                 let widest = inputs.iter().flatten().filter_map(|e| self.quiet_width(e, true)).max();
-                let width = match widest {
-                    Some(w) if all_literals => w,
-                    _ => {
-                        if inputs.iter().all(Option::is_some) {
-                            let name = self.info.instances[i].name.clone();
-                            let span = self.info.instances[i].span;
-                            self.error(Diagnostic::error(span, format!("can't work out how many bits `{name}` has")));
-                        }
-                        1
-                    }
-                };
-                self.info.instances[i].callee = Callee::Gate { kind, width };
+                match widest {
+                    Some(w) if all_literals => Ok(w),
+                    _ if inputs.iter().all(Option::is_some) && !inputs.is_empty() => Err(()),
+                    _ => Ok(1),
+                }
+            };
+            let mut new_width = width;
+            let mut new_addr = addr;
+            let mut unknown = false;
+            if width == 0 {
+                new_width = guess(PortWidth::Bus).unwrap_or_else(|()| {
+                    unknown = true;
+                    1
+                });
             }
+            if kind == GateKind::Ram && addr == 0 {
+                new_addr = guess(PortWidth::Address).unwrap_or_else(|()| {
+                    unknown = true;
+                    1
+                });
+            }
+            if unknown {
+                let name = self.info.instances[i].name.clone();
+                let span = self.info.instances[i].span;
+                self.error(Diagnostic::error(span, format!("can't work out how many bits `{name}` has")));
+            }
+            self.info.instances[i].callee = Callee::Gate { kind, width: new_width, addr: new_addr };
         }
         for w in 0..self.wire_widths.len() {
             if self.wire_widths[w].is_none() {
@@ -625,10 +727,20 @@ impl BodyCheck<'_> {
             drivers.insert(Name::Wire(i), vec![false; wire.width]);
         }
 
+        let shared: HashSet<Name> = self.info.instances.iter().filter(|i| i.shared).filter_map(|i| i.drives).collect();
+        let mixed = |me: &Self, target: Name, span: Span| {
+            let name = me.target_name(target);
+            Diagnostic::error(
+                span,
+                format!("`{name}` is a shared wire (it has `<-` drivers), so this line needs `<-` too"),
+            )
+            .note(format!("every driver of a shared wire uses `<-`, like `{name} <- TriBuf(x, en)`"))
+        };
+
         for i in 0..self.info.instances.len() {
             let instance = self.info.instances[i].clone();
             let sig = match &instance.callee {
-                Callee::Gate { kind, width } => gate_signature(*kind, *width),
+                Callee::Gate { kind, width, addr } => gate_signature(*kind, *width, *addr),
                 Callee::Chip(chip) => self.sigs[chip].clone(),
                 Callee::Unknown => {
                     // Already reported; count its output as driven so the
@@ -656,7 +768,7 @@ impl BodyCheck<'_> {
                 }
             }
             if let Some(target) = instance.drives {
-                let target_name = &instance.name;
+                let target_name = &if instance.shared { self.target_name(target) } else { instance.name.clone() };
                 let target_width = drivers[&target].len();
                 match sig.outputs.as_slice() {
                     [(_, width)] if *width != target_width => {
@@ -681,7 +793,14 @@ impl BodyCheck<'_> {
                         );
                     }
                 }
-                self.mark_driven(target, 0..target_width, instance.span, &mut drivers);
+                if instance.shared {
+                    drivers.get_mut(&target).expect("outputs and wires are registered").fill(true);
+                } else if shared.contains(&target) {
+                    let d = mixed(self, target, instance.span);
+                    self.error(d);
+                } else {
+                    self.mark_driven(target, 0..target_width, instance.span, &mut drivers);
+                }
             }
         }
 
@@ -712,6 +831,11 @@ impl BodyCheck<'_> {
                         plural(expected)
                     ),
                 ));
+            }
+            if shared.contains(&assign.target) {
+                let d = mixed(self, assign.target, assign.span);
+                self.error(d);
+                continue;
             }
             self.mark_driven(assign.target, bits, assign.span, &mut drivers);
         }
@@ -859,6 +983,36 @@ fn find_recursion(chips: &mut BTreeMap<String, ChipInfo>, diags: &mut Vec<Diagno
     }
 }
 
+/// Turns a value written in a test into bits for a signal of `width`.
+/// `Some(None)` is "don't care".
+fn test_bits(
+    v: &ast::TestValue,
+    name: &str,
+    width: usize,
+    is_input: bool,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<Option<Vec<Logic>>> {
+    match v.kind {
+        TestValueKind::Number(lit) => {
+            if !lit.fits(width) {
+                diags.push(Diagnostic::error(
+                    v.span,
+                    format!("{} doesn't fit in `{name}` ({width} bit{})", lit.value, plural(width)),
+                ));
+                return None;
+            }
+            Some(Some(bits_from_u64(lit.value, width)))
+        }
+        TestValueKind::X => Some(Some(vec![Logic::X; width])),
+        TestValueKind::Z => Some(Some(vec![Logic::Z; width])),
+        TestValueKind::Any if is_input => {
+            diags.push(Diagnostic::error(v.span, "inputs need a value").note("`*` (don't care) only works for checks"));
+            None
+        }
+        TestValueKind::Any => Some(None),
+    }
+}
+
 fn check_test(def: &ast::TestDef, chips: &BTreeMap<String, ChipInfo>, diags: &mut Vec<Diagnostic>) -> Option<TestInfo> {
     let Some(chip) = chips.get(&def.chip.name) else {
         let mut d = Diagnostic::error(def.chip.span, format!("there's no chip named `{}` to test", def.chip.name));
@@ -901,71 +1055,123 @@ fn check_test(def: &ast::TestDef, chips: &BTreeMap<String, ChipInfo>, diags: &mu
         }
     };
 
-    let mut rows = Vec::new();
-    for row in &def.rows {
-        for (values, ports, kind) in [(&row.inputs, &input_ports, "input"), (&row.outputs, &output_ports, "output")] {
-            if values.len() != ports.len() {
-                let names: Vec<String> = ports
-                    .iter()
-                    .map(|&p| if kind == "input" { chip.inputs[p].name.clone() } else { chip.outputs[p].name.clone() })
-                    .collect();
-                diags.push(Diagnostic::error(
-                    row.span,
-                    format!(
-                        "expected {} {kind} value{} ({}), found {}",
-                        names.len(),
-                        plural(names.len()),
-                        names.join(" "),
-                        values.len()
-                    ),
-                ));
-            }
+    // How wide a name `expect` can check is: any port, wire or box output.
+    let checkable = |name: &str| -> Option<usize> {
+        match chip.names.get(name)? {
+            Name::Input(i) => Some(chip.inputs[*i].width),
+            Name::Output(i) => Some(chip.outputs[*i].width),
+            Name::Wire(i) => Some(chip.wires[*i].width),
+            Name::Instance(k) => match &chip.instances[*k].callee {
+                Callee::Gate { width, .. } => Some(*width),
+                Callee::Chip(c) => match chips.get(c)?.outputs.as_slice() {
+                    [only] => Some(only.width),
+                    _ => None,
+                },
+                Callee::Unknown => None,
+            },
         }
-        let mut value = |v: &ast::TestValue, port: &Port, is_input: bool| -> Option<Option<Vec<Logic>>> {
-            match v.kind {
-                TestValueKind::Number(lit) => {
-                    if !lit.fits(port.width) {
+    };
+
+    let mut steps = Vec::new();
+    for step in &def.steps {
+        match step {
+            ast::TestStep::Row(row) => {
+                for (values, ports, kind) in
+                    [(&row.inputs, &input_ports, "input"), (&row.outputs, &output_ports, "output")]
+                {
+                    if values.len() != ports.len() {
+                        let names: Vec<String> = ports
+                            .iter()
+                            .map(|&p| {
+                                if kind == "input" { chip.inputs[p].name.clone() } else { chip.outputs[p].name.clone() }
+                            })
+                            .collect();
                         diags.push(Diagnostic::error(
-                            v.span,
+                            row.span,
                             format!(
-                                "{} doesn't fit in `{}` ({} bit{})",
-                                lit.value,
-                                port.name,
-                                port.width,
-                                plural(port.width)
+                                "expected {} {kind} value{} ({}), found {}",
+                                names.len(),
+                                plural(names.len()),
+                                names.join(" "),
+                                values.len()
                             ),
                         ));
-                        return None;
                     }
-                    Some(Some(bits_from_u64(lit.value, port.width)))
                 }
-                TestValueKind::X => Some(Some(vec![Logic::X; port.width])),
-                TestValueKind::Z => Some(Some(vec![Logic::Z; port.width])),
-                TestValueKind::Any if is_input => {
-                    diags.push(
-                        Diagnostic::error(v.span, "inputs need a value")
-                            .note("`*` (don't care) only works for outputs"),
-                    );
-                    None
-                }
-                TestValueKind::Any => Some(None),
+                let inputs = row
+                    .inputs
+                    .iter()
+                    .zip(&input_ports)
+                    .filter_map(|(v, &p)| {
+                        test_bits(v, &chip.inputs[p].name, chip.inputs[p].width, true, diags).flatten().map(|b| (p, b))
+                    })
+                    .collect();
+                let checks = row
+                    .outputs
+                    .iter()
+                    .zip(&output_ports)
+                    .filter_map(|(v, &p)| {
+                        let port = &chip.outputs[p];
+                        test_bits(v, &port.name, port.width, false, diags).map(|b| (port.name.clone(), b))
+                    })
+                    .collect();
+                steps.push(TestStepInfo::Row { span: row.span, inputs, checks });
             }
-        };
-        let inputs: Vec<Vec<Logic>> = row
-            .inputs
-            .iter()
-            .zip(&input_ports)
-            .filter_map(|(v, &p)| value(v, &chip.inputs[p], true).flatten())
-            .collect();
-        let outputs: Vec<Option<Vec<Logic>>> =
-            row.outputs.iter().zip(&output_ports).filter_map(|(v, &p)| value(v, &chip.outputs[p], false)).collect();
-        rows.push(TestRowInfo { span: row.span, inputs, outputs });
+            ast::TestStep::Set { values, span } => {
+                let mut inputs = Vec::new();
+                for (ident, v) in values {
+                    match chip.inputs.iter().position(|p| p.name == ident.name) {
+                        Some(p) => {
+                            if let Some(Some(bits)) = test_bits(v, &ident.name, chip.inputs[p].width, true, diags) {
+                                inputs.push((p, bits));
+                            }
+                        }
+                        None => {
+                            let names: Vec<String> = chip.inputs.iter().map(|p| p.name.clone()).collect();
+                            let mut d =
+                                Diagnostic::error(ident.span, format!("`{}` has no input `{}`", chip.name, ident.name))
+                                    .note(format!("`set` changes inputs; its inputs are {}", list(&names)));
+                            if let Some(close) = suggest(&ident.name, names.iter().map(String::as_str)) {
+                                d = d.label(format!("did you mean `{close}`?"));
+                            }
+                            diags.push(d);
+                        }
+                    }
+                }
+                steps.push(TestStepInfo::Set { span: *span, inputs });
+            }
+            ast::TestStep::Tick { count, span } => steps.push(TestStepInfo::Tick { span: *span, count: *count }),
+            ast::TestStep::Expect { values, span } => {
+                let mut checks = Vec::new();
+                for (ident, v) in values {
+                    match checkable(&ident.name) {
+                        Some(width) => {
+                            if let Some(expected) = test_bits(v, &ident.name, width, false, diags) {
+                                checks.push((ident.name.clone(), expected));
+                            }
+                        }
+                        None => {
+                            let mut d = Diagnostic::error(
+                                ident.span,
+                                format!("there's nothing named `{}` to check", ident.name),
+                            )
+                            .note("`expect` checks outputs, inputs, wires, or a box with one output");
+                            if let Some(close) = suggest(&ident.name, chip.names.keys().map(String::as_str)) {
+                                d = d.label(format!("did you mean `{close}`?"));
+                            }
+                            diags.push(d);
+                        }
+                    }
+                }
+                steps.push(TestStepInfo::Expect { span: *span, checks });
+            }
+        }
     }
 
     if count_errors(diags) > errors_before {
         return None;
     }
-    Some(TestInfo { chip: chip.name.clone(), span: def.span, input_ports, output_ports, rows })
+    Some(TestInfo { chip: chip.name.clone(), span: def.span, steps })
 }
 
 #[cfg(test)]
@@ -988,14 +1194,14 @@ mod tests {
         );
         assert!(messages.is_empty(), "{messages:?}");
         assert!(design.is_buildable("HalfAdder"));
-        assert_eq!(design.tests[0].rows.len(), 2);
+        assert_eq!(design.tests[0].steps.len(), 2);
     }
 
     #[test]
     fn gates_take_the_width_of_their_inputs() {
         let (design, messages) = check("chip A {\n in a[8], b[8]\n out y[8]\n y = And(a, b)\n}");
         assert!(messages.is_empty(), "{messages:?}");
-        assert_eq!(design.chips["A"].instances[0].callee, Callee::Gate { kind: GateKind::And, width: 8 });
+        assert_eq!(design.chips["A"].instances[0].callee, Callee::Gate { kind: GateKind::And, width: 8, addr: 0 });
     }
 
     #[test]

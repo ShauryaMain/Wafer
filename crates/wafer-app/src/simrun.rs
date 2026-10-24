@@ -31,6 +31,11 @@ pub struct SimRunner {
     pub trace: Option<Trace>,
     /// When set, the canvas shows values from this step instead of now.
     pub cursor: Option<u64>,
+    /// Tick the clock by itself while playing.
+    pub auto_clock: bool,
+    /// Clock ticks per second when it runs by itself.
+    pub clock_hz: f32,
+    since_tick: f32,
 }
 
 impl Default for SimRunner {
@@ -54,6 +59,9 @@ impl SimRunner {
             steps: 0,
             trace: None,
             cursor: None,
+            auto_clock: false,
+            clock_hz: 2.0,
+            since_tick: 0.0,
         }
     }
 
@@ -156,10 +164,49 @@ impl SimRunner {
 
     /// Advances by `dt` seconds of real time. Returns true while signals are
     /// still changing, so the caller keeps repainting.
+    /// True when the chip has flip-flops or memory, so the clock matters.
+    pub fn has_clock(&self) -> bool {
+        self.sim.as_ref().is_some_and(|s| !s.netlist().flops.is_empty() || !s.netlist().rams.is_empty())
+    }
+
+    pub fn ticks(&self) -> u64 {
+        self.sim.as_ref().map_or(0, Simulator::ticks)
+    }
+
+    /// One clock tick. If signals are still changing it lets them settle
+    /// first, so a tick always samples a calm circuit (like a test's `tick`).
+    pub fn tick(&mut self) {
+        let Some(sim) = &mut self.sim else { return };
+        while !sim.is_settled() {
+            let changed = sim.step().to_vec();
+            if let Some(trace) = &mut self.trace {
+                trace.record(sim, &changed);
+            }
+            if sim.time() > self.steps + testing::MAX_STEPS * 2 {
+                break;
+            }
+        }
+        let changed = sim.clock_edge().to_vec();
+        if let Some(trace) = &mut self.trace {
+            trace.record(sim, &changed);
+            trace.tick(sim.time());
+        }
+        self.steps = 0;
+        self.cursor = None;
+        self.since_tick = 0.0;
+    }
+
     pub fn advance(&mut self, dt: f32) -> bool {
+        if self.playing && self.auto_clock && self.has_clock() && self.is_settled() {
+            self.since_tick += dt;
+            if self.since_tick >= 1.0 / self.clock_hz.max(0.01) {
+                self.tick();
+            }
+        }
         if !self.playing || self.is_settled() {
             self.budget = 0.0;
-            return false;
+            // A running clock needs frames to keep time.
+            return self.playing && self.auto_clock && self.has_clock();
         }
         let steps = if self.instant {
             testing::MAX_STEPS
@@ -190,12 +237,13 @@ impl SimRunner {
             return format!("can't simulate: {error}");
         }
         let delays = |n: u64| if n == 1 { "1 gate delay".to_string() } else { format!("{n} gate delays") };
+        let clock = if self.has_clock() { format!("tick {} · ", self.ticks()) } else { String::new() };
         if self.is_settled() {
-            format!("settled after {}", delays(self.steps))
+            format!("{clock}settled after {}", delays(self.steps))
         } else if self.playing {
-            format!("running… {}", delays(self.steps))
+            format!("{clock}running… {}", delays(self.steps))
         } else {
-            format!("paused after {}", delays(self.steps))
+            format!("{clock}paused after {}", delays(self.steps))
         }
     }
 }

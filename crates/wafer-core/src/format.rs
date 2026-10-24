@@ -218,7 +218,10 @@ impl Formatter<'_> {
             return;
         }
         let toks = std::mem::take(current);
-        let line = if is_test {
+        let is_step = matches!(&toks[0].tok, Tok::Ident(w) if matches!(w.as_str(), "set" | "tick" | "expect"));
+        let line = if is_test && is_step {
+            BodyLine::Code { parts: vec![self.join(&toks)], kind: CodeKind::Other, comment: comment.take() }
+        } else if is_test {
             BodyLine::Code {
                 parts: toks.iter().map(|t| self.slice(t).to_string()).collect(),
                 kind: CodeKind::Row,
@@ -389,14 +392,14 @@ fn print_test_body(out: &mut String, lines: &[BodyLine]) {
     let rows: Vec<&Vec<String>> = lines
         .iter()
         .filter_map(|l| match l {
-            BodyLine::Code { parts, .. } => Some(parts),
+            BodyLine::Code { parts, kind: CodeKind::Row, .. } => Some(parts),
             _ => None,
         })
         .collect();
     let cells = rows.first().map_or(0, |r| r.len());
 
     // A `// a b | sum` comment right above the first row names the columns.
-    let first_row = lines.iter().position(|l| matches!(l, BodyLine::Code { .. }));
+    let first_row = lines.iter().position(|l| matches!(l, BodyLine::Code { kind: CodeKind::Row, .. }));
     let header = first_row.and_then(|r| r.checked_sub(1)).and_then(|h| match &lines[h] {
         BodyLine::Comment(text) => {
             let words: Vec<String> = text.trim_start_matches('/').split_whitespace().map(str::to_string).collect();
@@ -438,8 +441,11 @@ fn print_test_body(out: &mut String, lines: &[BodyLine]) {
             group.clear();
         };
         match line {
-            BodyLine::Code { parts, comment, .. } => {
+            BodyLine::Code { parts, comment, kind: CodeKind::Row } => {
                 group.push((format!("{row_indent}{}", lay_out(parts)), comment.clone()))
+            }
+            BodyLine::Code { parts, comment, .. } => {
+                group.push((format!("{INDENT}{}", parts.join(" ")), comment.clone()))
             }
             BodyLine::Comment(_) if header.as_ref().is_some_and(|(h, _)| *h == i) => {
                 flush(out, &mut group);
@@ -492,6 +498,17 @@ mod tests {
             parse(0, &once, &mut diags);
             assert!(diags.is_empty(), "{} doesn't parse after formatting", path.display());
         }
+    }
+
+    #[test]
+    fn formats_test_steps() {
+        let messy = "chip C {\n  in r\n  out y\n  y = Not(r)\n}\ntest C {\n  set r=1 ;tick\n  expect y=0   // checked\n  tick  5\n}\n";
+        let tidy = format(messy).unwrap();
+        assert_eq!(
+            tidy,
+            "chip C {\n  in  r\n  out y\n  y = Not(r)\n}\n\ntest C {\n  set r = 1\n  tick\n  expect y = 0  // checked\n  tick 5\n}\n"
+        );
+        assert_eq!(format(&tidy).unwrap(), tidy);
     }
 
     #[test]

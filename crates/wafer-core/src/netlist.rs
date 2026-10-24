@@ -5,17 +5,46 @@ use std::fmt;
 
 use crate::ast::{Expr, ExprKind};
 use crate::check::{Callee, ChipInfo, Design, Name};
-use crate::gate::GateKind;
+use crate::gate::{GateKind, PortWidth};
 use crate::logic::{Logic, bits_from_u64};
 
 pub type NetId = u32;
 
-/// A one-bit gate. `Not` only reads `a`.
+/// A one-bit combinational gate. Gates with fewer inputs repeat `a`; only
+/// `Mux` reads `c` (its select).
 #[derive(Clone, Copy, Debug)]
 pub struct Gate {
     pub kind: GateKind,
     pub a: NetId,
     pub b: NetId,
+    pub c: NetId,
+    pub out: NetId,
+}
+
+/// A one-bit flip-flop: `q` takes `d`'s value at each clock tick.
+#[derive(Clone, Copy, Debug)]
+pub struct Flop {
+    pub d: NetId,
+    pub q: NetId,
+}
+
+/// A block of memory. `out` always shows the word at `addr`; on a clock
+/// tick with `write` at 1, `data` is stored there.
+#[derive(Clone, Debug)]
+pub struct RamBlock {
+    /// Where it is, like `cpu.ram`.
+    pub path: String,
+    pub addr: Vec<NetId>,
+    pub data: Vec<NetId>,
+    pub write: NetId,
+    pub out: Vec<NetId>,
+}
+
+/// A shared wire bit with several drivers (`data <- TriBuf(...)` lines).
+/// Drivers letting go (Z) don't count; two driving at once makes X.
+#[derive(Clone, Debug)]
+pub struct Wired {
+    pub drivers: Vec<NetId>,
     pub out: NetId,
 }
 
@@ -34,6 +63,9 @@ pub struct Netlist {
     pub chip: String,
     pub net_count: usize,
     pub gates: Vec<Gate>,
+    pub flops: Vec<Flop>,
+    pub rams: Vec<RamBlock>,
+    pub wired: Vec<Wired>,
     pub constants: Vec<(NetId, Logic)>,
     pub inputs: Vec<Signal>,
     pub outputs: Vec<Signal>,
@@ -76,8 +108,16 @@ impl Netlist {
         if !design.is_buildable(chip) {
             return Err(BuildError::HasErrors(chip.into()));
         }
-        let mut b =
-            Builder { design, parent: Vec::new(), gates: Vec::new(), constants: Vec::new(), signals: Vec::new() };
+        let mut b = Builder {
+            design,
+            parent: Vec::new(),
+            gates: Vec::new(),
+            flops: Vec::new(),
+            rams: Vec::new(),
+            wired: Vec::new(),
+            constants: Vec::new(),
+            signals: Vec::new(),
+        };
         let inputs: Vec<Vec<NetId>> = info.inputs.iter().map(|p| b.fresh(p.width)).collect();
         let outputs: Vec<Vec<NetId>> = info.outputs.iter().map(|p| b.fresh(p.width)).collect();
         b.instantiate(chip, "", &inputs, &outputs, 0)?;
@@ -103,7 +143,28 @@ impl Netlist {
         let netlist = Netlist {
             chip: chip.into(),
             net_count: net_count as usize,
-            gates: b.gates.iter().map(|g| Gate { a: map(g.a), b: map(g.b), out: map(g.out), ..*g }).collect(),
+            gates: b
+                .gates
+                .iter()
+                .map(|g| Gate { a: map(g.a), b: map(g.b), c: map(g.c), out: map(g.out), ..*g })
+                .collect(),
+            flops: b.flops.iter().map(|f| Flop { d: map(f.d), q: map(f.q) }).collect(),
+            rams: b
+                .rams
+                .iter()
+                .map(|r| RamBlock {
+                    path: r.path.clone(),
+                    addr: r.addr.iter().map(|&n| map(n)).collect(),
+                    data: r.data.iter().map(|&n| map(n)).collect(),
+                    write: map(r.write),
+                    out: r.out.iter().map(|&n| map(n)).collect(),
+                })
+                .collect(),
+            wired: b
+                .wired
+                .iter()
+                .map(|w| Wired { drivers: w.drivers.iter().map(|&n| map(n)).collect(), out: map(w.out) })
+                .collect(),
             constants: b.constants.iter().map(|&(n, v)| (map(n), v)).collect(),
             inputs: info.inputs.iter().zip(&inputs).map(|(p, nets)| signal(&p.name, nets)).collect(),
             outputs: info.outputs.iter().zip(&outputs).map(|(p, nets)| signal(&p.name, nets)).collect(),
@@ -130,6 +191,9 @@ impl Netlist {
             .gates
             .iter()
             .map(|g| g.out)
+            .chain(self.flops.iter().map(|f| f.q))
+            .chain(self.rams.iter().flat_map(|r| r.out.iter().copied()))
+            .chain(self.wired.iter().map(|w| w.out))
             .chain(self.constants.iter().map(|&(n, _)| n))
             .chain(self.inputs.iter().flat_map(|s| s.nets.iter().copied()));
         for net in driven {
@@ -152,6 +216,9 @@ struct Builder<'a> {
     /// Union-find over raw nets: connecting two names merges their nets.
     parent: Vec<NetId>,
     gates: Vec<Gate>,
+    flops: Vec<Flop>,
+    rams: Vec<RamBlock>,
+    wired: Vec<Wired>,
     constants: Vec<(NetId, Logic)>,
     signals: Vec<Signal>,
 }
@@ -232,9 +299,10 @@ impl Builder<'_> {
         let wires: Vec<Vec<NetId>> = info.wires.iter().map(|w| self.fresh(w.width)).collect();
         let mut instance_outputs = Vec::with_capacity(info.instances.len());
         for inst in &info.instances {
+            // A shared wire's drivers each get their own nets, joined below.
             let nets = match inst.drives {
-                Some(Name::Output(i)) => vec![outputs[i].clone()],
-                Some(Name::Wire(i)) => vec![wires[i].clone()],
+                Some(Name::Output(i)) if !inst.shared => vec![outputs[i].clone()],
+                Some(Name::Wire(i)) if !inst.shared => vec![wires[i].clone()],
                 _ => design.signature(&inst.callee).outputs.iter().map(|(_, w)| self.fresh(*w)).collect(),
             };
             instance_outputs.push(nets);
@@ -265,12 +333,29 @@ impl Builder<'_> {
                     None => self.fresh(*width),
                 })
                 .collect();
+            let out = &instance_outputs[k];
             match &inst.callee {
-                Callee::Gate { kind, width } => {
+                Callee::Gate { kind: GateKind::Dff, width, .. } => {
                     for bit in 0..*width {
-                        let a = args[0][bit];
-                        let b = args.get(1).map_or(a, |arg| arg[bit]);
-                        self.gates.push(Gate { kind: *kind, a, b, out: instance_outputs[k][0][bit] });
+                        self.flops.push(Flop { d: args[0][bit], q: out[0][bit] });
+                    }
+                }
+                Callee::Gate { kind: GateKind::Ram, .. } => self.rams.push(RamBlock {
+                    path: format!("{prefix}{}", inst.name),
+                    addr: args[0].clone(),
+                    data: args[1].clone(),
+                    write: args[2][0],
+                    out: out[0].clone(),
+                }),
+                Callee::Gate { kind, width, .. } => {
+                    for bit in 0..*width {
+                        // One-bit inputs like `sel` feed every bit.
+                        let pick = |port: usize| match args.get(port) {
+                            Some(arg) if kind.port_width(port) == PortWidth::Bus => arg[bit],
+                            Some(arg) => arg[0],
+                            None => args[0][bit],
+                        };
+                        self.gates.push(Gate { kind: *kind, a: pick(0), b: pick(1), c: pick(2), out: out[0][bit] });
                     }
                 }
                 Callee::Chip(callee) => {
@@ -278,6 +363,24 @@ impl Builder<'_> {
                     self.instantiate(callee, &inner, &args, &instance_outputs[k], depth + 1)?;
                 }
                 Callee::Unknown => unreachable!("unbuildable chips are rejected up front"),
+            }
+        }
+
+        // Join each shared wire's drivers, bit by bit.
+        let mut shared: Vec<(Name, Vec<usize>)> = Vec::new();
+        for (k, inst) in info.instances.iter().enumerate() {
+            if let (true, Some(target)) = (inst.shared, inst.drives) {
+                match shared.iter_mut().find(|(t, _)| *t == target) {
+                    Some((_, drivers)) => drivers.push(k),
+                    None => shared.push((target, vec![k])),
+                }
+            }
+        }
+        for (target, drivers) in shared {
+            let wire = scope.name_nets(target);
+            for (bit, &out) in wire.iter().enumerate() {
+                let drivers = drivers.iter().map(|&k| instance_outputs[k][0][bit]).collect();
+                self.wired.push(Wired { drivers, out });
             }
         }
         Ok(())
@@ -293,7 +396,9 @@ impl Builder<'_> {
             }
         }
         for (inst, outputs) in info.instances.iter().zip(scope.instance_outputs) {
-            if inst.drives.is_some() {
+            // Boxes that drive a port or wire share its name; shared-wire
+            // drivers keep their own (`data_d1`) so each driver's value shows.
+            if inst.drives.is_some() && !inst.shared {
                 continue;
             }
             let sig = scope.design.signature(&inst.callee);

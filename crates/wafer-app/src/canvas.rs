@@ -902,7 +902,10 @@ impl Canvas {
             .selected_wire
             .as_ref()
             .and_then(|id| s.wires.iter().position(|w| s.nodes[w.source.0].key == id.node && w.source.1 == id.pin));
-        for (i, wire) in s.wires.iter().enumerate() {
+        // Floating (Z) wires first, so a live value drawn over the same spot wins.
+        let mut order: Vec<(usize, &wafer_core::schematic::Wire)> = s.wires.iter().enumerate().collect();
+        order.sort_by_key(|(_, w)| !self.val(sim, &w.signal).is_some_and(|v| v.iter().all(|&b| b == Logic::Z)));
+        for (i, wire) in order {
             let value = self.val(sim, &wire.signal);
             let style = theme::wire_style(wire.width, value.as_deref());
             let stroke = Stroke::new((style.width * z).max(1.0), style.color);
@@ -964,7 +967,10 @@ impl Canvas {
                         theme::TEXT,
                     );
                 }
-                NodeKind::Gate { name, kind } => {
+                NodeKind::Gate { name, kind, label } if kind.is_sequential() => {
+                    self.block(painter, node, at, size, label, name, true);
+                }
+                NodeKind::Gate { name, kind, .. } => {
                     self.gate(painter, *kind, at);
                     self.text(
                         painter,
@@ -975,56 +981,7 @@ impl Canvas {
                         theme::MUTED,
                     );
                 }
-                NodeKind::Chip { name, chip } => {
-                    let r = Rect::from_min_size(at, size);
-                    painter.rect(
-                        r,
-                        6.0 * z,
-                        theme::GATE_FILL,
-                        Stroke::new(1.5 * z, theme::GATE_STROKE),
-                        StrokeKind::Middle,
-                    );
-                    self.text(
-                        painter,
-                        at + vec2(size.x / 2.0, 16.0 * z),
-                        Align2::CENTER_CENTER,
-                        chip,
-                        12.0,
-                        theme::TEXT,
-                    );
-                    painter.line_segment(
-                        [at + vec2(0.0, 28.0 * z), at + vec2(size.x, 28.0 * z)],
-                        Stroke::new(1.0, theme::GRID),
-                    );
-                    for pin in &node.inputs {
-                        self.text(
-                            painter,
-                            self.to_screen(pos2(pin.x + 8.0, pin.y)),
-                            Align2::LEFT_CENTER,
-                            &pin.name,
-                            11.0,
-                            theme::MUTED,
-                        );
-                    }
-                    for pin in &node.outputs {
-                        self.text(
-                            painter,
-                            self.to_screen(pos2(pin.x - 8.0, pin.y)),
-                            Align2::RIGHT_CENTER,
-                            &pin.name,
-                            11.0,
-                            theme::MUTED,
-                        );
-                    }
-                    self.text(
-                        painter,
-                        at + vec2(size.x / 2.0, -9.0 * z),
-                        Align2::CENTER_CENTER,
-                        name,
-                        11.0,
-                        theme::MUTED,
-                    );
-                }
+                NodeKind::Chip { name, chip } => self.block(painter, node, at, size, chip, name, false),
             }
             if self.selection.contains(&node.key) {
                 let r = Rect::from_min_size(at, size).expand(5.0 * z);
@@ -1164,14 +1121,13 @@ impl Canvas {
         let (shape, triangles) = gate_mesh(kind);
         let map = |p: Pos2| at + p.to_vec2() * z;
         let stroke = Stroke::new((2.0 * z).max(1.0), theme::GATE_STROKE);
-        let inputs: &[f32] = if kind == GateKind::Not { &[25.0] } else { &[15.0, 35.0] };
-        if shape.back_x > 0.0 {
-            for &y in inputs {
-                painter.line_segment([map(pos2(0.0, y)), map(pos2(shape.back_x, y))], stroke);
+        for &(y, x) in &shape.stubs {
+            if x > 0.0 {
+                painter.line_segment([map(pos2(0.0, y)), map(pos2(x, y))], stroke);
             }
         }
-        if let Some(extra) = &shape.extra {
-            painter.add(Shape::line(extra.iter().map(|&p| map(p)).collect(), stroke));
+        for line in &shape.extra {
+            painter.add(Shape::line(line.iter().map(|&p| map(p)).collect(), stroke));
         }
         let points: Vec<Pos2> = shape.body.iter().map(|&p| map(p)).collect();
         let mut mesh = egui::Mesh::default();
@@ -1190,6 +1146,55 @@ impl Canvas {
             shape.tip
         };
         painter.line_segment([map(pos2(stub_start, 25.0)), map(pos2(GATE_W, 25.0))], stroke);
+        for &(at, label) in &shape.labels {
+            self.text(painter, map(at), Align2::LEFT_CENTER, label, 9.0, theme::MUTED);
+        }
+    }
+
+    /// A chip, or a box-shaped built-in like Dff and Ram: a labeled box with
+    /// its pin names inside, and a clock triangle if it ticks.
+    #[allow(clippy::too_many_arguments)]
+    fn block(
+        &self,
+        painter: &egui::Painter,
+        node: &wafer_core::schematic::Node,
+        at: Pos2,
+        size: Vec2,
+        title: &str,
+        name: &str,
+        clocked: bool,
+    ) {
+        let z = self.zoom;
+        let r = Rect::from_min_size(at, size);
+        painter.rect(r, 6.0 * z, theme::GATE_FILL, Stroke::new(1.5 * z, theme::GATE_STROKE), StrokeKind::Middle);
+        self.text(painter, at + vec2(size.x / 2.0, 16.0 * z), Align2::CENTER_CENTER, title, 12.0, theme::TEXT);
+        painter.line_segment([at + vec2(0.0, 28.0 * z), at + vec2(size.x, 28.0 * z)], Stroke::new(1.0, theme::GRID));
+        for pin in &node.inputs {
+            self.text(
+                painter,
+                self.to_screen(pos2(pin.x + 8.0, pin.y)),
+                Align2::LEFT_CENTER,
+                &pin.name,
+                11.0,
+                theme::MUTED,
+            );
+        }
+        for pin in &node.outputs {
+            self.text(
+                painter,
+                self.to_screen(pos2(pin.x - 8.0, pin.y)),
+                Align2::RIGHT_CENTER,
+                &pin.name,
+                11.0,
+                theme::MUTED,
+            );
+        }
+        if clocked {
+            let b = at.y + size.y;
+            let points = vec![pos2(at.x, b - 16.0 * z), pos2(at.x + 9.0 * z, b - 10.0 * z), pos2(at.x, b - 4.0 * z)];
+            painter.add(Shape::line(points, Stroke::new(1.5 * z, theme::GATE_STROKE)));
+        }
+        self.text(painter, at + vec2(size.x / 2.0, -9.0 * z), Align2::CENTER_CENTER, name, 11.0, theme::MUTED);
     }
 }
 

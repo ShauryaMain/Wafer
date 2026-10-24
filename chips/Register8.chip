@@ -1,0 +1,22 @@
+// An 8-bit register. On each clock tick it loads `d` if `load` is 1, and
+// keeps what it had otherwise. A Dff on a bus is eight flip-flops side by
+// side.
+chip Register8 {
+  in  d[8], load
+  out out[8]
+
+  next = Mux(out, d, load)
+  out  = Dff(next)
+}
+
+test Register8 {
+  set d = 0x2A, load = 1
+  tick
+  expect out = 0x2A
+  set d = 0x55, load = 0
+  tick
+  expect out = 0x2A  // held: load was 0
+  set load = 1
+  tick
+  expect out = 0x55
+}

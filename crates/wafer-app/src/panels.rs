@@ -173,7 +173,7 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState, s: &wafer_core::schem
         NodeKind::Output { name, width } => {
             (if *width == 1 { "Output".to_string() } else { format!("Output · {width} bits") }, name.clone())
         }
-        NodeKind::Gate { name, kind } => (format!("{} gate", kind.name()), name.clone()),
+        NodeKind::Gate { name, kind, .. } => (format!("{} · {}", kind.name(), kind.describe()), name.clone()),
         NodeKind::Chip { name, chip } => (format!("{chip} chip"), name.clone()),
     };
     heading(ui, &kind.to_uppercase());
@@ -202,6 +202,11 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState, s: &wafer_core::schem
             }
         }
     });
+
+    if let NodeKind::Gate { name, kind: wafer_core::GateKind::Ram, .. } = &node.kind {
+        ui.add_space(6.0);
+        memory_view(ui, state, name);
+    }
 
     if let NodeKind::Input { name, width } = &node.kind {
         ui.add_space(4.0);
@@ -255,6 +260,36 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState, s: &wafer_core::schem
     if ui.button("Delete").clicked() {
         state.canvas.delete_selection(s, &mut state.ws);
     }
+}
+
+/// A Ram's contents, live, with the word at its current address highlighted.
+fn memory_view(ui: &mut egui::Ui, state: &AppState, name: &str) {
+    heading(ui, "MEMORY");
+    let path = format!("{}{name}", state.canvas.prefix);
+    let Some(sim) = &state.sim.sim else { return };
+    let Some(index) = sim.netlist().rams.iter().position(|r| r.path == path) else { return };
+    let ram = &sim.netlist().rams[index];
+    let width = ram.data.len();
+    let current = bits_to_u64(&sim.values(&ram.addr));
+    let words: Vec<&[Logic]> = sim.memory(index).chunks(width).collect();
+    let digits = format!("{:X}", words.len().saturating_sub(1)).len();
+    ui.label(RichText::new(format!("{} words of {width} bits (live)", words.len())).color(theme::MUTED).small());
+    egui::ScrollArea::vertical().id_salt("memory").max_height(240.0).show(ui, |ui| {
+        for (row, chunk) in words.chunks(4).enumerate().take(1024) {
+            ui.horizontal(|ui| {
+                ui.label(mono(format!("{:0digits$X}:", row * 4)).color(theme::MUTED));
+                for (i, word) in chunk.iter().enumerate() {
+                    let here = current == Some((row * 4 + i) as u64);
+                    let text = mono(format_bits(word));
+                    ui.label(if here {
+                        text.color(theme::BACKGROUND).background_color(theme::BUS)
+                    } else {
+                        text.color(theme::TEXT)
+                    });
+                }
+            });
+        }
+    });
 }
 
 fn input_editor(ui: &mut egui::Ui, state: &mut AppState, name: &str, width: usize) {
@@ -356,7 +391,7 @@ pub fn tests(ui: &mut egui::Ui, state: &mut AppState) {
                 let passed: usize = results.outcomes.iter().map(|o| o.passed_rows()).sum();
                 let (mark, color) = if results.passed() { ("✔", theme::ONE) } else { ("✖", theme::UNKNOWN) };
                 let mut summary =
-                    if total > 0 { format!("{mark} {passed}/{total} rows pass") } else { mark.to_string() };
+                    if total > 0 { format!("{mark} {passed}/{total} checks pass") } else { mark.to_string() };
                 if let Some(check) = &results.builtin {
                     summary += &if check.passed() {
                         format!(" · matches built-in {}", check.gate.name())
@@ -376,7 +411,10 @@ pub fn tests(ui: &mut egui::Ui, state: &mut AppState) {
                 ui.label(RichText::new(format!("can't build it: {error}")).color(theme::UNKNOWN));
             }
             for row in &outcome.rows {
-                let inputs: Vec<String> = row.inputs.iter().map(|(n, v)| format!("{n}={v}")).collect();
+                let mut inputs: Vec<String> = row.inputs.iter().map(|(n, v)| format!("{n}={v}")).collect();
+                if row.ticks > 0 {
+                    inputs.insert(0, format!("tick {}:", row.ticks));
+                }
                 let line = state.ws.project.sources.line(row.span);
                 if row.passed() {
                     ui.label(mono(format!("✔ line {line:<3} {}", inputs.join(" "))).color(theme::ONE));
