@@ -1437,3 +1437,151 @@ fn builds_decode() {
     let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "Decode");
     assert!(results.passed(), "Decode's tests fail:\n{text}");
 }
+
+/// Builds Stack on the canvas the way the guide in the chat says to.
+#[test]
+fn builds_stack() {
+    let dir = example_project("stack");
+    reset_chip(&dir, "Stack", "  in  data[16], write, delta[2], execute, reset\n  out top[16]\n");
+    let mut h = open(&dir);
+    h.state_mut().state.open_chip("Stack");
+    h.run_steps(3);
+
+    // Step 1: the parts, in three columns.
+    let c = h.state().state.canvas.rect().center();
+    for (part, at) in [
+        ("StackPointer", vec2(-240.0, -190.0)),
+        ("Dff", vec2(-240.0, -40.0)),
+        ("Mux", vec2(-240.0, 120.0)),
+        ("Dff", vec2(-50.0, 120.0)),
+        ("Mux", vec2(140.0, 120.0)),
+        ("Ram", vec2(280.0, -60.0)),
+    ] {
+        add(&mut h, c + at, part);
+    }
+    h.hover_at(c);
+    h.run_steps(1);
+    h.key_press(Key::F);
+    h.run_steps(3);
+
+    // Step 2: the pointer moves in execute ticks.
+    connect(&mut h, ("in:delta", 0), ("stackpointer1", 0), None);
+    connect(&mut h, ("in:execute", 0), ("stackpointer1", 1), None);
+    connect(&mut h, ("in:reset", 0), ("stackpointer1", 2), None);
+    // Step 3: catch what to write...
+    connect(&mut h, ("in:data", 0), ("dff1", 0), None);
+    // Step 4: ...and whether, cleared by reset...
+    connect(&mut h, ("in:write", 0), ("mux1", 0), None);
+    pin_menu(&mut h, ("mux1", 1), "Set to 0");
+    connect(&mut h, ("in:reset", 0), ("mux1", 2), None);
+    connect(&mut h, ("mux1", 0), ("dff2", 0), None);
+    // Step 5: ...and only in fetch ticks.
+    connect(&mut h, ("dff2", 0), ("mux2", 0), None);
+    pin_menu(&mut h, ("mux2", 1), "Set to 0");
+    connect(&mut h, ("in:execute", 0), ("mux2", 2), None);
+    // Step 6: the memory.
+    connect(&mut h, ("stackpointer1", 0), ("ram1", 0), None);
+    connect(&mut h, ("dff1", 0), ("ram1", 1), None);
+    connect(&mut h, ("mux2", 0), ("ram1", 2), None);
+    connect(&mut h, ("ram1", 0), ("out:top", 0), None);
+    shot(&mut h, "stack");
+
+    let text = chip_text(&dir, "Stack.chip");
+    for line in [
+        "stackpointer1 = StackPointer(delta, execute, reset)",
+        "dff1 = Dff(data)",
+        "mux1 = Mux(write, 0, reset)",
+        "dff2 = Dff(mux1)",
+        "mux2 = Mux(dff2, 0, execute)",
+        "ram1 = Ram(stackpointer1, dff1, mux2)",
+        "top = ram1",
+    ] {
+        assert!(text.contains(line), "missing `{line}`:\n{text}");
+    }
+    let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "Stack");
+    assert!(results.passed(), "Stack's tests fail:\n{text}");
+}
+
+/// Builds Sequencer on the canvas the way the guide in the chat says to.
+#[test]
+fn builds_sequencer() {
+    let dir = example_project("sequencer");
+    let ports = "  in  reset, jump, jz, ret, t[16], r[16], addr[13]\n  out execute, pc[13], pc1[13]\n";
+    reset_chip(&dir, "Sequencer", ports);
+    let mut h = open_sized(&dir, egui::vec2(2000.0, 1400.0));
+    h.state_mut().state.open_chip("Sequencer");
+    h.run_steps(3);
+
+    // Step 1: the parts, in rows.
+    let c = h.state().state.canvas.rect().center();
+    for (part, at) in [
+        ("Not", vec2(-300.0, -260.0)),
+        ("Mux", vec2(-140.0, -260.0)),
+        ("Dff", vec2(20.0, -260.0)),
+        ("Register16", vec2(-300.0, -60.0)),
+        ("Inc13", vec2(-60.0, -60.0)),
+        ("Compare16", vec2(-300.0, 160.0)),
+        ("And", vec2(-90.0, 160.0)),
+        ("Or", vec2(80.0, 160.0)),
+        ("Mux", vec2(200.0, -20.0)),
+        ("Mux", vec2(360.0, -20.0)),
+    ] {
+        add(&mut h, c + at, part);
+    }
+    h.hover_at(c);
+    h.run_steps(1);
+    h.key_press(Key::F);
+    h.run_steps(3);
+
+    // Step 2: the phase flips every tick, and reset makes it fetch.
+    connect(&mut h, ("dff1", 0), ("not1", 0), None);
+    connect(&mut h, ("not1", 0), ("mux1", 0), None);
+    pin_menu(&mut h, ("mux1", 1), "Set to 0");
+    connect(&mut h, ("in:reset", 0), ("mux1", 2), None);
+    connect(&mut h, ("mux1", 0), ("dff1", 0), None);
+    connect(&mut h, ("dff1", 0), ("out:execute", 0), None);
+    // Step 3: the PC loads at the end of execute ticks; pc1 is the next one.
+    connect(&mut h, ("dff1", 0), ("register16_1", 1), None);
+    connect(&mut h, ("in:reset", 0), ("register16_1", 2), None);
+    connect(&mut h, ("register16_1", 0), ("inc13_1", 0), Some("register16_1[12:0]"));
+    connect(&mut h, ("register16_1", 0), ("out:pc", 0), Some("register16_1[12:0]"));
+    connect(&mut h, ("inc13_1", 0), ("out:pc1", 0), None);
+    // Step 4: is T zero?
+    connect(&mut h, ("in:t", 0), ("compare16_1", 0), None);
+    pin_menu(&mut h, ("compare16_1", 1), "Set to 0");
+    // Step 5: jump, or jz while T is 0.
+    connect(&mut h, ("in:jz", 0), ("and1", 0), None);
+    connect(&mut h, ("compare16_1", 0), ("and1", 1), None);
+    connect(&mut h, ("in:jump", 0), ("or1", 0), None);
+    connect(&mut h, ("and1", 0), ("or1", 1), None);
+    // Step 6: the next PC.
+    connect(&mut h, ("inc13_1", 0), ("mux2", 0), None);
+    connect(&mut h, ("in:addr", 0), ("mux2", 1), None);
+    connect(&mut h, ("or1", 0), ("mux2", 2), None);
+    connect(&mut h, ("mux2", 0), ("mux3", 0), None);
+    connect(&mut h, ("in:r", 0), ("mux3", 1), Some("r[12:0]"));
+    connect(&mut h, ("in:ret", 0), ("mux3", 2), None);
+    connect(&mut h, ("mux3", 0), ("register16_1", 0), Some("register16_1.d[12:0]"));
+    shot(&mut h, "sequencer");
+
+    let text = chip_text(&dir, "Sequencer.chip");
+    for line in [
+        "not1 = Not(dff1)",
+        "mux1 = Mux(not1, 0, reset)",
+        "dff1 = Dff(mux1)",
+        "register16_1 = Register16({0b000, mux3}, dff1, reset)",
+        "inc13_1 = Inc13(register16_1[12:0])",
+        "compare16_1 = Compare16(t, 0)",
+        "and1 = And(jz, compare16_1.eq)",
+        "or1 = Or(jump, and1)",
+        "mux2 = Mux(inc13_1, addr, or1)",
+        "mux3 = Mux(mux2, r[12:0], ret)",
+        "execute = dff1",
+        "pc = register16_1[12:0]",
+        "pc1 = inc13_1",
+    ] {
+        assert!(text.contains(line), "missing `{line}`:\n{text}");
+    }
+    let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "Sequencer");
+    assert!(results.passed(), "Sequencer's tests fail:\n{text}");
+}

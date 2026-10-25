@@ -663,6 +663,30 @@ impl BodyCheck<'_> {
     /// Works out the width of built-in gates (from their inputs) and of
     /// wires made by assignment, repeating until nothing changes.
     fn infer_widths(&mut self) {
+        self.spread_widths();
+        // A bitwise chip nothing has decided yet, like one in a loop of parts
+        // that all take their width from each other: one copy per bit of
+        // the widest thing it's given, or just one. Then let that spread.
+        let mut settled = false;
+        for i in 0..self.info.instances.len() {
+            if let Callee::Chip { copies: 0, .. } = self.info.instances[i].callee {
+                let widest =
+                    self.info.instances[i].inputs.iter().flatten().filter_map(|e| self.quiet_width(e, true)).max();
+                if let Callee::Chip { copies, .. } = &mut self.info.instances[i].callee {
+                    *copies = widest.unwrap_or(1).max(1);
+                }
+                settled = true;
+            }
+        }
+        if settled {
+            self.spread_widths();
+        }
+        self.guess_widths();
+    }
+
+    /// Works widths out from what's already known, repeating until nothing
+    /// changes.
+    fn spread_widths(&mut self) {
         loop {
             let mut changed = false;
             for i in 0..self.info.instances.len() {
@@ -706,10 +730,11 @@ impl BodyCheck<'_> {
                 break;
             }
         }
+    }
 
+    /// Gates whose width nothing decided: the widest number they're given.
+    fn guess_widths(&mut self) {
         for i in 0..self.info.instances.len() {
-            // A bitwise chip given only numbers (or nothing): one copy per
-            // bit of the widest number.
             if let Callee::Chip { copies: 0, .. } = self.info.instances[i].callee {
                 let widest =
                     self.info.instances[i].inputs.iter().flatten().filter_map(|e| self.quiet_width(e, true)).max();

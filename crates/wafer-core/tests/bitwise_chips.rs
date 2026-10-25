@@ -7,6 +7,7 @@ use wafer_core::{Design, Netlist, Project, Simulator, schematic};
 
 /// Xor from four Nands, like `chips/Xor.chip`, plus our own 1-bit adders.
 const PARTS: &str = "\
+chip Not {\n in a\n out out\n out = Nand(a, a)\n}\n\
 chip Xor {\n in a, b\n out out\n n1 = Nand(a, b)\n n2 = Nand(a, n1)\n n3 = Nand(b, n1)\n out = Nand(n2, n3)\n}\n\
 chip And {\n in a, b\n out out\n n = Nand(a, b)\n out = Nand(n, n)\n}\n\
 chip HalfAdder {\n in a, b\n out sum, carry\n sum = Xor(a, b)\n carry = And(a, b)\n}\n";
@@ -107,4 +108,22 @@ fn inside_every_signal_is_as_wide_as_the_bus() {
     let node = outside.nodes.iter().find(|n| n.key == "y").unwrap();
     assert!(matches!(&node.kind, schematic::NodeKind::Chip { copies: 16, .. }));
     assert!(node.inputs.iter().all(|p| p.width == 16));
+}
+
+#[test]
+fn a_loop_through_a_bitwise_chip_settles_at_one_bit() {
+    // Nothing in this loop has a width of its own: Not spreads to whatever
+    // it's given, and Mux and Dff take what they're given.
+    let d = design("chip T {\n in reset\n out q\n n = Not(d)\n m = Mux(n, 0, reset)\n d = Dff(m)\n q = d\n}");
+    assert!(!d.has_errors(), "{:#?}", d.diagnostics);
+    let mut sim = Simulator::new(Netlist::build(&d, "T").unwrap());
+    sim.set_input(0, &bits_from_u64(1, 1));
+    sim.tick(1000).unwrap();
+    sim.set_input(0, &bits_from_u64(0, 1));
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        sim.tick(1000).unwrap();
+        seen.push(bits_to_u64(&sim.read("q").unwrap()));
+    }
+    assert_eq!(seen, [Some(1), Some(0), Some(1), Some(0)], "it toggles every tick");
 }

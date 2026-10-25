@@ -1,0 +1,69 @@
+// One of Crumb's stacks: 32 words, with `top` showing the word the pointer
+// is at. Crumb uses two, for N (the data stack) and R (the return stack).
+//
+// It works in Crumb's two ticks. At the end of an execute tick the pointer
+// moves by `delta`, and `data` and `write` are caught in flip-flops; then
+// during the fetch tick that follows, the caught word is written where the
+// pointer now is (if `write` was 1). That way the stack's one memory reads
+// N or R during execute and writes during fetch, never both at once.
+// `reset` puts the pointer at 0 and cancels a waiting write.
+chip Stack {
+  in  data[16], write, delta[2], execute, reset
+  out top[16]
+  stackpointer1 = StackPointer(delta, execute, reset)
+  dff1 = Dff(data)
+  mux1 = Mux(write, 0, reset)
+  dff2 = Dff(mux1)
+  mux2 = Mux(dff2, 0, execute)
+  ram1 = Ram(stackpointer1, dff1, mux2)
+  top = ram1
+}
+
+test Stack {
+  set data = 0, write = 0, delta = 0b00, execute = 0, reset = 1
+  tick
+  set reset = 0
+  // Push 0x1111: in the execute tick the pointer moves up and the word waits...
+  set execute = 1, write = 1, delta = 0b01, data = 0x1111
+  tick
+  // ...then the fetch tick writes it, and it's on top.
+  set execute = 0, write = 0, delta = 0b00, data = 0
+  tick
+  expect top = 0x1111
+  // Push 0x2222 the same way.
+  set execute = 1, write = 1, delta = 0b01, data = 0x2222
+  tick
+  set execute = 0, write = 0, delta = 0b00, data = 0
+  tick
+  expect top = 0x2222
+  // Pop: move down 1 and write nothing. 0x1111 shows straight away.
+  set execute = 1, delta = 0b11
+  tick
+  expect top = 0x1111
+  set execute = 0, delta = 0b00
+  tick
+  expect top = 0x1111
+  // Replace the top without moving, like `swap` writing a new N.
+  set execute = 1, write = 1, delta = 0b00, data = 0x3333
+  tick
+  expect top = 0x1111      // not yet: the write happens in the fetch tick
+  set execute = 0, write = 0, data = 0
+  tick
+  expect top = 0x3333
+  // In a fetch tick nothing moves, whatever the inputs say.
+  set write = 1, delta = 0b01, data = 0x4444
+  tick
+  expect top = 0x3333
+  // Reset puts the pointer back at 0 and cancels a waiting push...
+  set execute = 1, write = 1, delta = 0b01, data = 0x5555, reset = 1
+  tick
+  set execute = 0, write = 0, delta = 0b00, data = 0, reset = 0
+  tick
+  expect top = 0           // the bottom word was never written
+  // ...but what's in memory stays: moving up finds 0x3333 again.
+  set execute = 1, delta = 0b01
+  tick
+  set execute = 0, delta = 0b00
+  tick
+  expect top = 0x3333
+}
