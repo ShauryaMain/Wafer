@@ -127,3 +127,19 @@ fn a_loop_through_a_bitwise_chip_settles_at_one_bit() {
     }
     assert_eq!(seen, [Some(1), Some(0), Some(1), Some(0)], "it toggles every tick");
 }
+
+#[test]
+fn a_gate_given_only_numbers_sets_the_width_of_a_bitwise_chip_it_feeds() {
+    // `m` is as wide as 0xB400, so the Xor it feeds spreads to 16 copies,
+    // with the 1-bit `a` going to every copy. Before, the Xor settled at
+    // one copy while `m`'s width was still being worked out.
+    let d = design("chip T {\n in s, a\n out y[16]\n m = Mux(0, 0xB400, s)\n y = Xor(a, m)\n}");
+    assert!(!d.has_errors(), "{:#?}", d.diagnostics);
+    assert_eq!(d.chips["T"].instances[1].callee, Callee::Chip { name: "Xor".into(), copies: 16 });
+    assert_eq!(run(&d, "T", &[(1, 1), (0, 1)], "y"), Some(0xB400));
+    assert_eq!(run(&d, "T", &[(1, 1), (1, 1)], "y"), Some(0x4BFF));
+    assert_eq!(run(&d, "T", &[(0, 1), (1, 1)], "y"), Some(0xFFFF));
+    // Half wired, the way the canvas sees it part way through.
+    let d = design("chip T {\n in s\n out y[16]\n m = Mux(0, 0xB400, s)\n x = Xor(b: m)\n}");
+    assert_eq!(d.chips["T"].instances[1].callee, Callee::Chip { name: "Xor".into(), copies: 16 });
+}

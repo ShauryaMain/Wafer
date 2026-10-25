@@ -36,9 +36,13 @@ pub fn chips(ui: &mut egui::Ui, state: &mut AppState) {
         }
     });
     ui.add_space(8.0);
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        heading(ui, "CHIPS");
-        let current = state.canvas.root.clone();
+    heading(ui, "CHIPS");
+    let current = state.canvas.root.clone();
+    let inside = has_chips_inside(&state.ws.design, &current);
+    // With a tree to show below, the list scrolls in the top half, so a
+    // project with lots of chips can't push the tree out of view.
+    let max_height = if inside { ui.available_height() / 2.0 } else { f32::INFINITY };
+    egui::ScrollArea::vertical().id_salt("chips").max_height(max_height).show(ui, |ui| {
         for name in state.ws.chip_names() {
             let ok = state.ws.design.is_buildable(&name);
             let mut text = RichText::new(&name).monospace();
@@ -53,22 +57,23 @@ pub fn chips(ui: &mut egui::Ui, state: &mut AppState) {
                 response.on_hover_text("This chip (or one inside it) has errors. See Problems.");
             }
         }
+    });
 
-        // The open chip's insides, as a tree: click a level to look inside it.
-        let root = state.canvas.root.clone();
-        if has_chips_inside(&state.ws.design, &root) {
-            ui.add_space(12.0);
-            heading(ui, &format!("INSIDE {}", root.to_uppercase()));
+    // The open chip's insides, as a tree: click a level to look inside it.
+    if inside {
+        ui.add_space(12.0);
+        heading(ui, &format!("INSIDE {}", current.to_uppercase()));
+        egui::ScrollArea::vertical().id_salt("inside").show(ui, |ui| {
             let mut go: Option<Vec<(String, String)>> = None;
-            if ui.selectable_label(state.canvas.path.is_empty(), mono(&root)).clicked() {
+            if ui.selectable_label(state.canvas.path.is_empty(), mono(&current)).clicked() {
                 go = Some(Vec::new());
             }
-            tree(ui, &state.ws.design, &root, &mut Vec::new(), &state.canvas.path, &mut go);
+            tree(ui, &state.ws.design, &current, &mut Vec::new(), &state.canvas.path, &mut go);
             if let Some(path) = go {
                 state.canvas.set_path(path);
             }
-        }
-    });
+        });
+    }
 }
 
 fn has_chips_inside(design: &wafer_core::Design, chip: &str) -> bool {

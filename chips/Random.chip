@@ -1,0 +1,46 @@
+// Pseudo-random numbers for the Console's RANDOM port: a 16-bit Galois
+// LFSR (docs/crumb.md). `reset` loads the seed 0xACE1; after that, every
+// clock tick it shifts right by 1, and if the bit that fell off the
+// bottom was 1, it flips the tap bits (Xor with 0xB400). It goes through
+// every number but 0 before it repeats, 65535 ticks later.
+chip Random {
+  in  reset
+  out random[16]
+  register16_1 = Register16(mux2, 1, 0)
+  mux1 = Mux(0, 0xB400, register16_1[0])
+  xor1 = Xor({0b0, register16_1[15:1]}, mux1)
+  mux2 = Mux(xor1, 0xACE1, reset)
+  random = register16_1
+}
+
+test Random {
+  set reset = 1
+  tick
+  expect random = 0xACE1     // reset loads the seed
+  tick 3
+  expect random = 0xACE1     // and holds it while reset is 1
+  set reset = 0
+  tick
+  expect random = 0xE270     // bit 0 was 1: 0x5670 with the taps flipped
+  tick
+  expect random = 0x7138     // bit 0 was 0: just shifted
+  tick
+  expect random = 0x389C
+  tick
+  expect random = 0x1C4E
+  tick
+  expect random = 0x0E27
+  tick
+  expect random = 0xB313     // a 1 fell off again
+  tick 94
+  expect random = 0x94A3     // 100 ticks after reset
+  tick 900
+  expect random = 0x7C8C     // 1000
+  // Reset again: back to the seed, and the same numbers follow.
+  set reset = 1
+  tick
+  set reset = 0
+  expect random = 0xACE1
+  tick
+  expect random = 0xE270
+}

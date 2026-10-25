@@ -664,6 +664,29 @@ impl BodyCheck<'_> {
     /// wires made by assignment, repeating until nothing changes.
     fn infer_widths(&mut self) {
         self.spread_widths();
+        // A gate given only numbers is as wide as the widest one, which is
+        // what guess_widths decides at the end anyway. Deciding it first
+        // lets a bitwise chip it feeds spread to match, instead of settling
+        // at one copy below.
+        let mut settled = false;
+        for i in 0..self.info.instances.len() {
+            let Callee::Gate { kind, width: 0, addr } = self.info.instances[i].callee else { continue };
+            let widest = {
+                let bus: Vec<&Expr> = (self.info.instances[i].inputs.iter().enumerate())
+                    .filter(|(p, _)| kind.port_width(*p) == PortWidth::Bus)
+                    .filter_map(|(_, e)| e.as_ref())
+                    .collect();
+                let numbers_only = !bus.is_empty() && bus.iter().all(|e| matches!(e.kind, ExprKind::Literal(_)));
+                numbers_only.then(|| bus.iter().filter_map(|e| self.quiet_width(e, true)).max().unwrap_or(1))
+            };
+            if let Some(width) = widest {
+                self.info.instances[i].callee = Callee::Gate { kind, width, addr };
+                settled = true;
+            }
+        }
+        if settled {
+            self.spread_widths();
+        }
         // A bitwise chip nothing has decided yet, like one in a loop of parts
         // that all take their width from each other: one copy per bit of
         // the widest thing it's given, or just one. Then let that spread.

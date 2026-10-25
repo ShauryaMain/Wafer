@@ -2016,3 +2016,57 @@ fn builds_frame_counter() {
     let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "FrameCounter");
     assert!(results.passed(), "FrameCounter's tests fail:\n{text}");
 }
+
+/// Builds Random on the canvas the way the guide in the chat says to.
+#[test]
+fn builds_random() {
+    let dir = example_project("random");
+    reset_chip(&dir, "Random", "  in  reset\n  out random[16]\n");
+    let mut h = open_sized(&dir, egui::vec2(2000.0, 1400.0));
+    h.state_mut().state.open_chip("Random");
+    h.run_steps(3);
+    let c = h.state().state.canvas.rect().center();
+    for (part, at) in [
+        ("Register16", vec2(300.0, 0.0)),
+        ("Mux", vec2(-260.0, -140.0)),
+        ("Xor", vec2(-80.0, -40.0)),
+        ("Mux", vec2(110.0, 20.0)),
+    ] {
+        add(&mut h, c + at, part);
+    }
+    h.hover_at(c);
+    h.run_steps(1);
+    h.key_press(Key::F);
+    h.run_steps(3);
+
+    // The register loads every tick; its own reset isn't used.
+    pin_menu(&mut h, ("register16_1", 1), "Set to 1");
+    pin_menu(&mut h, ("register16_1", 2), "Set to 0");
+    // The taps, if the bit falling off is 1.
+    pin_menu(&mut h, ("mux1", 0), "Set to 0");
+    pin_number(&mut h, ("mux1", 1), "0xB400");
+    connect(&mut h, ("register16_1", 0), ("mux1", 2), Some("register16_1[0]"));
+    // Shift right by 1 and flip the taps.
+    connect(&mut h, ("mux1", 0), ("xor1", 1), None);
+    option_connect(&mut h, ("register16_1", 0), ("xor1", 0), ">> 1");
+    // Reset loads the seed instead.
+    connect(&mut h, ("xor1", 0), ("mux2", 0), None);
+    pin_number(&mut h, ("mux2", 1), "0xACE1");
+    connect(&mut h, ("in:reset", 0), ("mux2", 2), None);
+    connect(&mut h, ("mux2", 0), ("register16_1", 0), None);
+    connect(&mut h, ("register16_1", 0), ("out:random", 0), None);
+    shot(&mut h, "random");
+
+    let text = chip_text(&dir, "Random.chip");
+    for line in [
+        "mux1 = Mux(0, 0xB400, register16_1[0])",
+        "xor1 = Xor({0b0, register16_1[15:1]}, mux1)",
+        "mux2 = Mux(xor1, 0xACE1, reset)",
+        "register16_1 = Register16(mux2, 1, 0)",
+        "random = register16_1",
+    ] {
+        assert!(text.contains(line), "missing `{line}`:\n{text}");
+    }
+    let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "Random");
+    assert!(results.passed(), "Random's tests fail:\n{text}");
+}
