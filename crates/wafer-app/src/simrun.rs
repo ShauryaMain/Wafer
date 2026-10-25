@@ -36,6 +36,8 @@ pub struct SimRunner {
     /// Clock ticks per second when it runs by itself.
     pub clock_hz: f32,
     since_tick: f32,
+    /// Goes up every time the simulator is built afresh.
+    pub builds: u64,
 }
 
 impl Default for SimRunner {
@@ -62,6 +64,7 @@ impl SimRunner {
             auto_clock: false,
             clock_hz: 2.0,
             since_tick: 0.0,
+            builds: 0,
         }
     }
 
@@ -92,6 +95,7 @@ impl SimRunner {
                 self.trace = Some(Trace::new(&sim, sim.netlist().signals.clone()));
                 self.sim = Some(sim);
                 self.error = None;
+                self.builds += 1;
             }
             Err(e) => {
                 self.sim = None;
@@ -103,6 +107,16 @@ impl SimRunner {
     /// Starts the chip over: every gate back to unknown, inputs kept.
     pub fn reset(&mut self) {
         self.generation = 0;
+    }
+
+    /// Starts the timeline's history again from now, for when the
+    /// simulator ran without recording (like a game playing).
+    pub fn retrace(&mut self) {
+        if let Some(sim) = &self.sim {
+            self.trace = Some(Trace::new(sim, sim.netlist().signals.clone()));
+        }
+        self.steps = 0;
+        self.cursor = None;
     }
 
     /// A signal's value right now, ignoring the timeline cursor.

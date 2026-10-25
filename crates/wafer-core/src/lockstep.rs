@@ -51,6 +51,75 @@ fn input_index(netlist: &Netlist, name: &str) -> usize {
     netlist.inputs.iter().position(|s| s.path == name).expect("the ports were checked")
 }
 
+/// True when `netlist` has a console's ports.
+pub fn is_console(netlist: &Netlist) -> bool {
+    missing_ports(netlist, &CONSOLE_INPUTS, &CONSOLE_OUTPUTS).is_empty()
+}
+
+/// Where a console's pieces are: the CPU box inside it, and its memories
+/// (as indexes into the netlist's). They're found by what they are, so
+/// their names don't matter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConsoleParts {
+    /// The CPU box: N is `<cpu>.mem_out` and R is `<cpu>.r`.
+    pub cpu: String,
+    pub rom: usize,
+    pub ram: usize,
+    pub screen: usize,
+}
+
+impl ConsoleParts {
+    pub fn find(design: &Design, chip: &str, netlist: &Netlist) -> Result<ConsoleParts, String> {
+        let missing = missing_ports(netlist, &CONSOLE_INPUTS, &CONSOLE_OUTPUTS);
+        if !missing.is_empty() {
+            return Err(format!("`{chip}` needs these ports to run as a console: {}", missing.join(", ")));
+        }
+        // The CPU is the box whose chip has a CPU's ports.
+        let fits = |ports: &[(String, usize)], wanted: &[(&str, usize)]| {
+            wanted.iter().all(|&(n, b)| ports.iter().any(|(m, w)| m == n && *w == b))
+        };
+        let info = design.chips.get(chip).ok_or_else(|| format!("there's no chip named `{chip}`"))?;
+        let cpu = (info.instances.iter())
+            .find(|inst| {
+                let sig = design.signature(&inst.callee);
+                fits(&sig.inputs, &INPUTS) && fits(&sig.outputs, &OUTPUTS)
+            })
+            .map(|inst| inst.name.clone())
+            .ok_or_else(|| format!("`{chip}` needs a CPU inside it, like a Crumb box"))?;
+        let find = |what: &str, wanted: &dyn Fn(&RamBlock) -> bool| {
+            let found: Vec<usize> = (netlist.rams.iter().enumerate())
+                .filter(|(_, r)| !r.path.contains('.') && wanted(r))
+                .map(|(i, _)| i)
+                .collect();
+            match found[..] {
+                [i] => Ok(i),
+                [] => Err(format!("`{chip}` needs {what}")),
+                _ => Err(format!("`{chip}` has more than one {what}")),
+            }
+        };
+        let rom = find("a Rom with 13 address bits for the program (`addr[12:0]`)", &|r| {
+            r.rom.is_some() && r.addr.len() == RAM_BITS
+        })?;
+        let ram = find("a Ram with 13 address bits for RAM (`addr[12:0]`)", &|r| {
+            r.rom.is_none() && r.addr.len() == RAM_BITS
+        })?;
+        let screen = find("a Ram with 9 address bits for the screen (`addr[8:0]`)", &|r| {
+            r.rom.is_none() && r.addr.len() == SCREEN_BITS
+        })?;
+        Ok(ConsoleParts { cpu, rom, ram, screen })
+    }
+}
+
+/// Puts `program` in a console's Rom in place of what it held, with zeros
+/// after it.
+pub fn load_program(sim: &mut Simulator, rom: usize, program: &[u16]) {
+    let mut words = vec![0; ROM_WORDS];
+    for (word, &w) in words.iter_mut().zip(program) {
+        *word = u64::from(w);
+    }
+    sim.load_memory(rom, &words);
+}
+
 /// What the lockstep needs from gates running Crumb, bare or in a console.
 trait Gates {
     /// One clock tick, with memory and the ports answering.
@@ -187,51 +256,10 @@ impl GateConsole {
     }
 
     fn from_netlist(design: &Design, chip: &str, netlist: Netlist, program: &[u16]) -> Result<GateConsole, String> {
-        let missing = missing_ports(&netlist, &CONSOLE_INPUTS, &CONSOLE_OUTPUTS);
-        if !missing.is_empty() {
-            return Err(format!("`{chip}` needs these ports to run as a console: {}", missing.join(", ")));
-        }
-        // The CPU is the box whose chip has a CPU's ports.
-        let fits = |ports: &[(String, usize)], wanted: &[(&str, usize)]| {
-            wanted.iter().all(|&(n, b)| ports.iter().any(|(m, w)| m == n && *w == b))
-        };
-        let info = design.chips.get(chip).ok_or_else(|| format!("there's no chip named `{chip}`"))?;
-        let cpu = (info.instances.iter())
-            .find(|inst| {
-                let sig = design.signature(&inst.callee);
-                fits(&sig.inputs, &INPUTS) && fits(&sig.outputs, &OUTPUTS)
-            })
-            .map(|inst| inst.name.clone())
-            .ok_or_else(|| format!("`{chip}` needs a CPU inside it, like a Crumb box"))?;
-        // Its memories are found by what they are, so their names don't matter.
-        let find = |what: &str, wanted: &dyn Fn(&RamBlock) -> bool| {
-            let found: Vec<usize> = (netlist.rams.iter().enumerate())
-                .filter(|(_, r)| !r.path.contains('.') && wanted(r))
-                .map(|(i, _)| i)
-                .collect();
-            match found[..] {
-                [i] => Ok(i),
-                [] => Err(format!("`{chip}` needs {what}")),
-                _ => Err(format!("`{chip}` has more than one {what}")),
-            }
-        };
-        let rom = find("a Rom with 13 address bits for the program (`addr[12:0]`)", &|r| {
-            r.rom.is_some() && r.addr.len() == RAM_BITS
-        })?;
-        let ram = find("a Ram with 13 address bits for RAM (`addr[12:0]`)", &|r| {
-            r.rom.is_none() && r.addr.len() == RAM_BITS
-        })?;
-        let screen = find("a Ram with 9 address bits for the screen (`addr[8:0]`)", &|r| {
-            r.rom.is_none() && r.addr.len() == SCREEN_BITS
-        })?;
-
+        let ConsoleParts { cpu, rom, ram, screen } = ConsoleParts::find(design, chip, &netlist)?;
         let inputs = ["reset", "pad", "switches"].map(|name| input_index(&netlist, name));
         let mut sim = Simulator::new(netlist);
-        let mut words = vec![0; ROM_WORDS];
-        for (word, &w) in words.iter_mut().zip(program) {
-            *word = u64::from(w);
-        }
-        sim.load_memory(rom, &words);
+        load_program(&mut sim, rom, program);
         // Nothing is known until the reset tick, `print` included.
         for (input, (value, bits)) in inputs.into_iter().zip([(1, 1), (0, 8), (0, 16)]) {
             sim.set_input(input, &bits_from_u64(value, bits));

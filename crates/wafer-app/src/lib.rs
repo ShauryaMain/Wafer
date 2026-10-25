@@ -4,6 +4,7 @@
 pub mod app;
 pub mod canvas;
 pub mod code;
+pub mod console;
 pub mod panels;
 pub mod shapes;
 pub mod simrun;

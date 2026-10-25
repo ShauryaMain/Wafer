@@ -2249,3 +2249,139 @@ fn builds_console() {
     let run = run.unwrap_or_else(|failure| panic!("{failure}"));
     assert_eq!((run.board.number, run.board.leds, run.board.console_text().as_str()), (42, 0x8001, "H"));
 }
+
+/// Runs the Console's gates for `ticks` clock ticks, as playing would over
+/// many frames.
+fn play_ticks(h: &mut Harness<'static, WaferApp>, ticks: u64) {
+    let st = &mut h.state_mut().state;
+    st.console.run_for(&mut st.sim, std::time::Duration::MAX, ticks);
+    h.run_steps(2);
+}
+
+/// Clicks one of the Console panel's buttons. The top bar and the timeline
+/// have their own Play, Pause and Reset; the panel's are furthest right.
+fn console_button(h: &mut Harness<'static, WaferApp>, label: &str) {
+    let node = h.get_all(by().label(label)).max_by(|a, b| a.rect().min.x.total_cmp(&b.rect().min.x));
+    node.unwrap_or_else(|| panic!("no {label} button")).click();
+    h.run_steps(3);
+}
+
+/// Picks a cartridge from the Console panel's menu, and lets it power on.
+fn insert(h: &mut Harness<'static, WaferApp>, cartridge: &str) {
+    h.get(by().role(egui::accesskit::Role::ComboBox)).click();
+    h.run_steps(2);
+    h.get_by_label(cartridge).click();
+    h.run_steps(3);
+}
+
+#[test]
+fn plays_the_console() {
+    let dir = example_project("play");
+    let mut h = open_sized(&dir, egui::vec2(2000.0, 1400.0));
+    h.state_mut().state.open_chip("Console");
+    h.run_steps(3);
+    let _ = h.get_by_label("Click the screen to play with the keyboard.");
+    // The Console's own program, count.asm, counts frames.
+    assert!(h.state().state.console.cartridge.is_none());
+    play_ticks(&mut h, 4200);
+    let _ = h.get_by_label("0001");
+    assert_eq!(h.state().state.sim.read("leds"), Some(bits_from_u64(1, 16)));
+
+    // hello.asm prints.
+    insert(&mut h, "hello.asm");
+    play_ticks(&mut h, 400);
+    assert_eq!(h.state().state.console.printed, "Hello, Crumb!\n");
+    let _ = h.get_by_label("Hello, Crumb!\n");
+
+    // bounce.asm draws on the screen, and Play keeps it going.
+    insert(&mut h, "bounce.asm");
+    play_ticks(&mut h, 12_000);
+    let lit = |h: &Harness<'static, WaferApp>, x, y| {
+        let st = &h.state().state;
+        st.console.pixel(&st.sim, x, y)
+    };
+    assert_eq!((lit(&h, 0, 0), lit(&h, 127, 63), lit(&h, 64, 30)), (Some(true), Some(true), Some(false)));
+    let before = h.state().state.sim.ticks();
+    console_button(&mut h, "Play");
+    h.run_steps(2);
+    assert!(h.state().state.console.running);
+    assert!(h.state().state.sim.ticks() > before, "it runs by itself");
+    assert!(h.state().state.sim.trace.is_none(), "the timeline doesn't record while it plays");
+    shot(&mut h, "console_panel");
+    console_button(&mut h, "Pause");
+    assert!(!h.state().state.console.running);
+    assert!(h.state().state.sim.trace.is_some(), "and starts again after");
+
+    // Reset keeps memory (the border stays); Power starts fresh.
+    console_button(&mut h, "Reset");
+    assert_eq!(lit(&h, 0, 0), Some(true), "reset keeps the screen");
+    console_button(&mut h, "Power");
+    assert_eq!(lit(&h, 0, 0), Some(false), "power starts with the screen dark");
+}
+
+#[test]
+fn the_gamepad_and_switches_reach_the_console() {
+    let dir = example_project("gamepad");
+    let mut h = open_sized(&dir, egui::vec2(2000.0, 1400.0));
+    h.state_mut().state.open_chip("Console");
+    h.run_steps(3);
+    insert(&mut h, "buttons.asm");
+    play_ticks(&mut h, 8200);
+    let _ = h.get_by_label("4020");
+
+    // Click the screen, then hold → and Z (right and A).
+    h.get_by_label("Screen").click();
+    h.run_steps(2);
+    let key = |h: &mut Harness<'static, WaferApp>, key: Key, pressed: bool| {
+        h.event(Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE });
+        h.run_steps(1);
+    };
+    key(&mut h, Key::ArrowRight, true);
+    key(&mut h, Key::Z, true);
+    assert_eq!(h.state().state.console.pad, 8 | 16);
+    let _ = h.get_by_label("Playing: arrows, Z = A, X = B, Enter = Start, Shift = Select. Escape lets go.");
+    play_ticks(&mut h, 3 * 4096);
+    assert_eq!(h.state().state.sim.read("leds"), Some(bits_from_u64(8 | 16, 16)));
+    let number = h.state().state.sim.read("number").and_then(|b| wafer_core::logic::bits_to_u64(&b)).unwrap();
+    assert!(number > 0x4020 && number & 0xFF == 0x20, "the dot moved right: {number:#06x}");
+    // The canvas didn't take X or Z as shortcuts while the screen had focus.
+    assert!(h.state().state.canvas_keys().iter().any(|k| k == "crumb1"));
+    key(&mut h, Key::ArrowRight, false);
+    key(&mut h, Key::Z, false);
+    assert_eq!(h.state().state.console.pad, 0);
+
+    // Switches flip with a click.
+    h.get_all(by().label("0").role(egui::accesskit::Role::Button)).next().unwrap().click();
+    h.run_steps(2);
+    assert_eq!(h.state().state.console.switches, 0x8000, "the leftmost switch is bit 15");
+}
+
+#[test]
+fn a_saved_cartridge_restarts() {
+    let dir = example_project("cartridge");
+    std::fs::write(dir.join("mine.asm"), ": main 1 NUMBER ! halt ;\n").unwrap();
+    let mut h = open_sized(&dir, egui::vec2(2000.0, 1400.0));
+    h.state_mut().state.open_chip("Console");
+    h.run_steps(3);
+    insert(&mut h, "mine.asm");
+    play_ticks(&mut h, 100);
+    let _ = h.get_by_label("0001");
+
+    // Save a new version: it reassembles and starts over by itself.
+    std::fs::write(dir.join("mine.asm"), ": main 0x22 NUMBER ! halt ;\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    h.run_steps(3);
+    play_ticks(&mut h, 100);
+    let _ = h.get_by_label("0022");
+
+    // A mistake shows, and the last version that worked keeps playing,
+    // right where it was.
+    let ticks = h.state().state.sim.ticks();
+    std::fs::write(dir.join("mine.asm"), ": main 3 NUMBRE ! halt ;\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    h.run_steps(3);
+    let error = h.state().state.console.error.clone().unwrap_or_default();
+    assert!(error.contains("NUMBRE"), "{error}");
+    assert_eq!(h.state().state.sim.ticks(), ticks, "it didn't start over");
+    let _ = h.get_by_label("0022");
+}

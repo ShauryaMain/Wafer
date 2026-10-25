@@ -12,7 +12,7 @@ use crate::code::CodePanel;
 use crate::simrun::{SimRunner, TestResults};
 use crate::timeline::{self, TimelineView};
 use crate::workspace::Workspace;
-use crate::{panels, theme};
+use crate::{console, panels, theme};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tab {
@@ -23,6 +23,7 @@ pub enum Tab {
     Problems,
     Timeline,
     Code,
+    Console,
 }
 
 /// Everything except the dock layout, so panels can borrow it freely.
@@ -36,6 +37,8 @@ pub struct AppState {
     pub rename: (String, String),
     pub timeline: TimelineView,
     pub code: CodePanel,
+    /// Plays the open chip when it's a game console.
+    pub console: console::Player,
 }
 
 pub struct WaferApp {
@@ -61,6 +64,7 @@ impl WaferApp {
             rename: (String::new(), String::new()),
             timeline: TimelineView::default(),
             code: CodePanel::default(),
+            console: console::Player::default(),
             ws,
         };
         WaferApp { state, dock: default_dock() }
@@ -74,13 +78,21 @@ impl WaferApp {
             let _ = self.dock.set_active_tab(path);
         }
     }
+
+    /// Whether a panel's tab is the one showing where it's docked.
+    pub fn tab_showing(&self, tab: Tab) -> bool {
+        self.dock.find_tab(&tab).is_some_and(|path| {
+            let node = egui_dock::NodePath { surface: path.surface, node: path.node };
+            self.dock.leaf(node).is_ok_and(|leaf| leaf.active == path.tab)
+        })
+    }
 }
 
 fn default_dock() -> DockState<Tab> {
     let mut dock = DockState::new(vec![Tab::Canvas]);
     let surface = dock.main_surface_mut();
     let [center, _] = surface.split_left(NodeIndex::root(), 0.16, vec![Tab::Chips]);
-    let [center, _] = surface.split_right(center, 0.72, vec![Tab::Inspector, Tab::Code]);
+    let [center, _] = surface.split_right(center, 0.72, vec![Tab::Inspector, Tab::Code, Tab::Console]);
     surface.split_below(center, 0.68, vec![Tab::Timeline, Tab::Tests, Tab::Problems]);
     dock
 }
@@ -109,6 +121,9 @@ impl AppState {
         let stale_tests = self.tests.as_ref().is_none_or(|t| t.chip != chip || t.generation != self.ws.generation);
         if stale_tests {
             self.tests = Some(TestResults::run(&self.ws, &chip));
+        }
+        if self.console.update(&mut self.sim, &self.ws, &root) {
+            ctx.request_repaint();
         }
 
         // App-wide shortcuts, unless you're typing in a text field. (The
@@ -252,6 +267,7 @@ impl TabViewer for Tabs<'_> {
             Tab::Problems => "Problems".into(),
             Tab::Timeline => "Timeline".into(),
             Tab::Code => "Code".into(),
+            Tab::Console => "Console".into(),
         }
     }
 
@@ -265,6 +281,7 @@ impl TabViewer for Tabs<'_> {
             Tab::Problems => panels::problems(ui, state),
             Tab::Timeline => timeline::ui(ui, &mut state.timeline, &mut state.sim, &state.canvas.prefix),
             Tab::Code => state.code.ui(ui, &mut state.ws, &mut state.canvas),
+            Tab::Console => console::ui(ui, state),
         }
     }
 
@@ -281,6 +298,13 @@ impl eframe::App for WaferApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.state.tick(&ctx);
+        match self.state.console.wants_front.take() {
+            Some(true) => self.show_tab(Tab::Console),
+            // Only in place of the Console panel, not some other choice.
+            Some(false) if self.tab_showing(Tab::Console) => self.show_tab(Tab::Inspector),
+            Some(false) => {}
+            None => {}
+        }
         egui::Panel::top("top_bar").show(ui, |ui| self.state.top_bar(ui));
         egui::Panel::bottom("status_bar").show(ui, |ui| self.state.status_bar(ui));
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(theme::PANEL)).show(ui, |ui| {

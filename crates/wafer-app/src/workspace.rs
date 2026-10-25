@@ -137,8 +137,11 @@ impl Workspace {
             return;
         }
 
+        // Programs count only when a Rom holds them: saving some other
+        // cartridge isn't a change to the chips.
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for id in project.files.iter().map(|(id, _)| id).chain(&project.programs) {
+        let held = design.programs.values().map(|program| &program.file);
+        for id in project.files.iter().map(|(id, _)| id).chain(held) {
             project.sources.get(*id).text.hash(&mut hasher);
         }
         let text_hash = hasher.finish();

@@ -52,3 +52,22 @@ fn bounce_bounces_off_the_walls() {
     let lit = m.screen_text().matches('#').count();
     assert_eq!(lit, 128 * 2 + 62 * 2 + 16, "border plus ball, nothing else");
 }
+
+#[test]
+fn buttons_shows_the_gamepad() {
+    let mut m = machine("buttons.asm");
+    m.run_frames(2);
+    assert_eq!((m.leds, m.number), (0, 0x4020), "nothing held: the dot waits at (64, 32)");
+    assert!(m.pixel(64, 32));
+    // Hold right and A for three frames: the LEDs show them and the dot moves.
+    m.pad = 8 | 16;
+    m.run_frames(3);
+    assert_eq!(m.leds, 8 | 16);
+    assert_eq!(m.number, 0x4320, "three pixels to the right");
+    assert!(m.pixel(67, 32) && !m.pixel(64, 32), "the dot moved, and its old spot is dark\n{}", m.screen_text());
+    // Up past the top edge comes back at the bottom.
+    m.pad = 1;
+    m.run_frames(40);
+    assert_eq!(m.number & 0xFF, 56, "32 - 40 wraps round to 56");
+    assert_eq!(m.screen_text().matches('#').count(), 1, "only the dot is lit");
+}

@@ -121,6 +121,22 @@ var paddle_y
 | Reset | **Memory keeps its words**, like real RAM. Reset restarts Crumb, clears the LEDs and number display, and restarts the frame counter and random numbers; the stacks, RAM and the screen are all zeros only at power-on. The spec and the reference Crumb changed to match (the gate-level Stack already worked this way) |
 | Checking | **Lockstep on any program.** The checker loads a program into the gate Console's Rom in place of `count.asm` and runs it next to the reference Crumb, comparing PC, T, N and R every instruction, the ports along the way, and RAM and the screen at the end. `wafer run prog.asm --gates` then runs the whole computer in gates |
 
+### Phase 3, round 7: the console in the app (2026-10-25)
+
+| Topic | Decision |
+|---|---|
+| Where | **A Console panel** beside the canvas, there whenever the open chip has a console's ports: the screen, LEDs, number display, text console, switches, the cartridge menu, and Power and Reset buttons. The canvas stays visible, so you can play and watch your gates at the same time |
+| Engine | **Your gates only.** Play runs the gate-level Console as fast as it goes (about 20 frames a second in a release build). Faster running is turbo mode, in 3d |
+| Cartridges | **Swap and reload on save.** The menu lists every `.asm` and `.hex` in the project; picking one loads it into the Rom and powers on fresh, while the chip file keeps `count.asm` as its default. When the cartridge's file changes on disk, it reassembles and restarts by itself, showing any assembler mistakes |
+| Look | **Green LCD:** dark green pixels on a pale green background, like a Game Boy |
+
+Decided along the way (no question needed):
+
+- **Keys go to the gamepad only while the screen has focus** (click it to play). The spec's keys clash with canvas shortcuts otherwise: X deletes, and the arrows and Enter do things too.
+- **Power** starts everything fresh (memory all zeros, the cartridge reloaded); **Reset** pulls `reset` for a tick, which keeps memory, as round 6 decided.
+- **Playing pauses the timeline's recording**, since 75,000 ticks a second of history is too much; pausing shows the canvas's live values as usual.
+- **Who builds:** 3c is app work, so Claude builds it and the user test-drives it, with a UI test for each piece.
+
 ## Core principles
 
 1. **Instant feedback.** Everything is live: flip an input and watch the signal ripple through.
@@ -398,7 +414,8 @@ The spec is [docs/crumb.md](docs/crumb.md): memory map, instruction encoding, th
     - ✅ Done 2026-10-25: the whole Console, built from our own Nand gates, runs about 37,000–44,000 instructions a second in a release build (75,000–89,000 ticks a second), so 18–22 frames a second at 4096 ticks per frame, before any turbo mode.
     - ✅ Done 2026-10-25: `wafer_core::lockstep` and `wafer run prog.asm --gates -p chips`. It compares PC and T after each instruction, N and R once the next fetch has landed the push, the number display, LEDs and console, and at the end all of RAM and the screen. A throwaway Crumb built to the plan matched the reference on hello.asm, count.asm, bounce.asm and nine instruction workouts.
     - **Speed, first measurement (2026-10-25):** the gate-level Crumb (our Nand-built gates throughout) runs about 5,000 instructions/s in a debug build and 40,000–60,000 instructions/s (80,000–120,000 ticks/s) in a release build (`cargo wafer` now builds in release). At 16,384 ticks per frame that's about 5 frames a second, so real-time games need turbo mode (3d) or fewer ticks per frame.
-- **3c, the console.** Screen panel, gamepad, LEDs and switches, number display, text console, frame counter and random port in the app, plus the cartridge menu.
+- **3c, the console.** Screen panel, gamepad, LEDs and switches, number display, text console, frame counter and random port in the app, plus the cartridge menu. Planned in round 7: a Console panel beside the canvas running your gates, with a green LCD screen and cartridges that reload on save. *Done when:* `count.asm`, `hello.asm` and `bounce.asm` run in the panel on the gate-level Console, a new `buttons.asm` shows the gamepad working, and editing a cartridge's `.asm` restarts it.
+  - Built 2026-10-25, for the user to test-drive: the **Console** tab (next to Inspector and Code) plays any chip with a console's ports on its gates, driving the same simulator the canvas shows. It has the green LCD (a pale margin so edge pixels show), 16 LEDs, the number display in hex and decimal, printed text, 16 switches, the gamepad (keys only while the screen has focus; Escape lets go), Play/Pause, Reset (memory kept) and Power (fresh). The cartridge menu lists the project's programs plus the chip's own; a chosen cartridge is reread when saved, and a mistake is shown while the last good version keeps playing. The tab comes forward when a playable console is opened and gives way to the Inspector when you open another chip. Saving a program no Rom holds no longer counts as a chip change, so it doesn't restart the simulator. Speed: about 76,000 ticks a second in release when running flat out (18.6 frames a second); the app gives it 12 ms of each frame. `buttons.asm` (LEDs show the buttons held, arrows move a dot, the number shows where) is checked on the reference and in lockstep.
 - **3d, debugger and turbo.** Step one instruction, breakpoints, a register, stack and memory view, and a turbo mode fast enough for games.
 - **3e, games.** Pong, then Tetris, then Space Invaders.
 

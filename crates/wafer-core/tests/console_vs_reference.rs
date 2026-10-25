@@ -32,7 +32,7 @@ fn matches(design: &Design, name: &str, source: &str, max: u64) {
 fn the_console_runs_programs_like_the_reference() {
     let design = Design::check(&Project::load(&chips_dir()).expect("the chips folder is readable"));
     let read = |file: &str| std::fs::read_to_string(chips_dir().join(file)).expect("the program is readable");
-    let programs: [(&str, &str, u64); 5] = [
+    let programs: [(&str, &str, u64); 6] = [
         // Every device: RAM, the screen, tables in the ROM, every port, and
         // addresses where nothing is (they read 0).
         (
@@ -50,6 +50,7 @@ fn the_console_runs_programs_like_the_reference() {
         ),
         ("hello.asm", &read("hello.asm"), 10_000),
         ("bounce.asm", &read("bounce.asm"), 3_000),
+        ("buttons.asm", &read("buttons.asm"), 3_000),
     ];
     for (name, source, max) in programs {
         matches(&design, name, source, max);
