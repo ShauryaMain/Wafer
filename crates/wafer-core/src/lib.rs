@@ -23,6 +23,7 @@ pub mod format;
 pub mod gate;
 pub mod layout_file;
 pub mod lexer;
+pub mod lockstep;
 pub mod logic;
 pub mod netlist;
 pub mod parser;

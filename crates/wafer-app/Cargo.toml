@@ -15,4 +15,5 @@ egui_dock = "0.21.1"
 wafer-core = { path = "../wafer-core" }
 
 [dev-dependencies]
+crumb = { path = "../crumb" }
 egui_kittest = { version = "0.36", features = ["eframe", "wgpu", "snapshot"] }

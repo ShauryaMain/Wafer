@@ -21,7 +21,12 @@ pub struct RunOptions {
     pub pad: Option<String>,
     pub screen: bool,
     pub png: Option<PathBuf>,
+    /// The project holding the gate-level Crumb to check against.
+    pub gates: Option<PathBuf>,
 }
+
+/// Instructions `wafer run --gates` allows when nothing says when to stop.
+const DEFAULT_GATE_STEPS: u64 = 100_000;
 
 /// Reads and assembles (or parses) a program, printing any mistakes.
 fn load(file: &Path, ui: &Ui) -> Result<(RomProgram, String), ExitCode> {
@@ -128,6 +133,9 @@ pub fn run(file: &Path, options: &RunOptions, ui: &Ui) -> ExitCode {
         Err(code) => return code,
     };
     let words: Vec<u16> = loaded.words.iter().map(|&w| w as u16).collect();
+    if let Some(dir) = &options.gates {
+        return run_gates(dir, &words, options, ui);
+    }
     let mut m = Machine::new(&words);
     if let Some(pad) = &options.pad {
         match parse_pad(pad) {
@@ -159,27 +167,85 @@ pub fn run(file: &Path, options: &RunOptions, ui: &Ui) -> ExitCode {
         );
         println!("{}", ui.dim("  (use --steps or --frames to say how long to run)"));
     }
+    let stack: Vec<String> = m.stack().iter().map(|v| format!("{v:#x}")).collect();
+    show_outputs(&m, Some(&stack.join(" ")), options, ui)
+}
+
+/// What the program left on the console, number display, LEDs and screen.
+fn show_outputs(m: &Machine, stack: Option<&str>, options: &RunOptions, ui: &Ui) -> ExitCode {
     if !m.console.is_empty() {
         println!("console:");
         for line in m.console_text().lines() {
             println!("  {line}");
         }
     }
-    let stack: Vec<String> = m.stack().iter().map(|v| format!("{v:#x}")).collect();
     println!("number   {:#06x} ({})", m.number, m.number);
     println!("leds     {:016b}", m.leds);
-    println!("stack    [{}]", stack.join(" "));
+    if let Some(stack) = stack {
+        println!("stack    [{stack}]");
+    }
     if options.screen {
-        print!("{}", screen_text(&m));
+        print!("{}", screen_text(m));
     }
     if let Some(path) = &options.png {
-        if let Err(e) = save_png(&m, path) {
+        if let Err(e) = save_png(m, path) {
             eprintln!("{} can't save {}: {e}", ui.fail("error:"), path.display());
             return ExitCode::FAILURE;
         }
         println!("{} {}", ui.dim("saved"), display_path(path));
     }
     ExitCode::SUCCESS
+}
+
+/// Runs the program on the gate-level `Crumb` chip and the reference side by
+/// side, and reports how fast the gates went.
+fn run_gates(dir: &Path, words: &[u16], options: &RunOptions, ui: &Ui) -> ExitCode {
+    use crumb::isa::{TICKS_PER_FRAME, TICKS_PER_INSTRUCTION};
+    use wafer_core::lockstep::lockstep;
+    use wafer_core::{Design, Project};
+
+    let project = match Project::load(dir) {
+        Ok(project) => project,
+        Err(e) => {
+            eprintln!("{} can't read {}: {e}", ui.fail("error:"), dir.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let design = Design::check(&project);
+    if !design.chips.contains_key("Crumb") {
+        eprintln!("{} there's no `Crumb` chip in {} (pass the folder with -p)", ui.fail("error:"), dir.display());
+        return ExitCode::FAILURE;
+    }
+    let max = match (options.frames, options.steps) {
+        (Some(frames), _) => frames * TICKS_PER_FRAME / TICKS_PER_INSTRUCTION,
+        (None, Some(steps)) => steps,
+        (None, None) => DEFAULT_GATE_STEPS,
+    };
+    match lockstep(&design, "Crumb", words, max, TICKS_PER_FRAME) {
+        Ok(run) => {
+            println!(
+                "{} the gate-level Crumb matched the reference for {} instructions ({} ticks){}",
+                ui.pass("matched:"),
+                run.instructions,
+                run.ticks,
+                if run.halted { ", then halted" } else { "" }
+            );
+            println!(
+                "{}",
+                ui.dim(&format!(
+                    "  {:.0} instructions/s in gates ({:.0} ticks/s)",
+                    run.instructions as f64 / run.seconds.max(1e-9),
+                    run.ticks as f64 / run.seconds.max(1e-9)
+                ))
+            );
+            // What it did, as the gate-level CPU did it.
+            show_outputs(&run.board, None, options, ui)
+        }
+        Err(failure) => {
+            eprintln!("{} {failure}", ui.fail("different:"));
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Two pixel rows per line of text, with half-block characters.

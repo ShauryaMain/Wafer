@@ -86,7 +86,9 @@ cargo wafer run chips/bounce.asm --frames 60 --screen --png renders/bounce.png
 ```
 
 `run` stops when the program halts (or use `--steps` / `--frames`), then
-shows the console, number display, LEDs and stack. `--pad up,a` holds
+shows the console, number display, LEDs and stack. `--gates -p chips` runs it
+on our gate-level Crumb instead, next to the reference: it stops at the first
+instruction where they differ, or shows what the program did on the gates. `--pad up,a` holds
 buttons down. `cargo wafer asm chips/bounce.asm --list` prints every word
 with its address, instruction and source, and `-o bounce.hex` saves the
 machine code.

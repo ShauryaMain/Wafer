@@ -1,0 +1,113 @@
+// Crumb: our 16-bit stack CPU (docs/crumb.md is the spec). It talks to the
+// rest of the console through a memory bus: it puts an address on `addr`
+// (the PC while fetching, T while executing), memory answers on `mem_in`,
+// and a store puts N on `mem_out` with `write` at 1. `execute`, `pc`, `t`
+// and `r` show what's inside, for tests and the debugger.
+//
+// Inside: the instruction register (loads in fetch ticks), Decode, the
+// Sequencer, ALU16, the T register (loads in execute ticks, from the ALU or
+// a literal), and two Stacks: N, which pushes T, and R, which pushes T or,
+// on a call, the address to return to.
+chip Crumb {
+  in  reset, mem_in[16]
+  out addr[16], mem_out[16], write
+  out execute, pc[13], t[16], r[16]
+  not1 = Not(sequencer1.execute)
+  register16_1 = Register16(mem_in, not1, reset)
+  decode1 = Decode(register16_1)
+  sequencer1 = Sequencer(reset, decode1.jump, decode1.jz, decode1.ret, register16_2, stack2, decode1.addr)
+  alu16_1 = ALU16(register16_2, stack1, stack2, mem_in, decode1.op)
+  mux1 = Mux(alu16_1, decode1.value, decode1.lit)
+  register16_2 = Register16(mux1, sequencer1.execute, reset)
+  stack1 = Stack(register16_2, decode1.t_to_n, decode1.dd, sequencer1.execute, reset)
+  mux2 = Mux(register16_2, {0b000, sequencer1.pc1}, decode1.call)
+  or1 = Or(decode1.t_to_r, decode1.call)
+  stack2 = Stack(mux2, or1, decode1.rd, sequencer1.execute, reset)
+  mux3 = Mux({0b000, sequencer1.pc}, register16_2, sequencer1.execute)
+  and1 = And(decode1.store, sequencer1.execute)
+  addr = mux3
+  mem_out = stack1
+  write = and1
+  execute = sequencer1.execute
+  pc = sequencer1.pc
+  t = register16_2
+  r = stack2
+}
+
+test Crumb {
+  // You play the memory: before each fetch, mem_in is the instruction at pc.
+  // A push lands in the next fetch tick, so N (mem_out) and R show it one
+  // tick after the instruction: just in time for the next one to use it.
+  set reset = 1, mem_in = 0
+  tick
+  expect execute = 0, pc = 0, addr = 0
+  set reset = 0
+  // lit 5, lit 3, +
+  set mem_in = 0x8005
+  tick 2
+  expect pc = 1, t = 5, addr = 1        // fetching again: the bus shows the PC, not T
+  set mem_in = 0x8003
+  tick 2
+  expect pc = 2, t = 3
+  set mem_in = 0x6203
+  tick
+  expect mem_out = 5                    // N, under T, once lit 3's push lands
+  tick
+  expect pc = 3, t = 8
+  // dup
+  set mem_in = 0x6081
+  tick 2
+  expect pc = 4, t = 8
+  // call 0x10: R holds the address to come back to
+  set mem_in = 0x4010
+  tick
+  expect mem_out = 8                    // dup's copy has landed
+  tick
+  expect pc = 0x10
+  // r@ copies R onto the data stack (through the ALU); drop takes it off
+  set mem_in = 0x6E81
+  tick
+  expect r = 5                          // the call's return address has landed
+  tick
+  expect pc = 0x11, t = 5
+  set mem_in = 0x6103
+  tick 2
+  expect pc = 0x12, t = 8
+  // lit 0x2000, then store N there: during execute the bus shows the write
+  set mem_in = 0xA000
+  tick 2
+  expect pc = 0x13, t = 0x2000
+  set mem_in = 0x6123
+  tick
+  expect execute = 1, addr = 0x2000, mem_out = 8, write = 1
+  tick
+  expect pc = 0x14, t = 8, write = 0
+  // exit: back to 5
+  set mem_in = 0x700C
+  tick 2
+  expect pc = 5, r = 0
+  // jz 0x42 with T = 8: no jump, and it pops
+  set mem_in = 0x2042
+  tick 2
+  expect pc = 6, t = 8, mem_out = 0
+  // lit 0, then jz 0x40: jumps
+  set mem_in = 0x8000
+  tick 2
+  expect pc = 7, t = 0
+  set mem_in = 0x2040
+  tick 2
+  expect pc = 0x40, t = 8
+  // lit 0x2000, then @: memory answers with the word that was stored, 8
+  set mem_in = 0xA000
+  tick 2
+  set mem_in = 0x6D00
+  tick
+  expect execute = 1, addr = 0x2000
+  set mem_in = 8
+  tick
+  expect pc = 0x42, t = 8
+  // jump 0x50
+  set mem_in = 0x0050
+  tick 2
+  expect pc = 0x50
+}

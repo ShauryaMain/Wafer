@@ -1,5 +1,5 @@
 [alias]
 # `cargo wafer test` runs the wafer command without installing it.
-wafer = "run --quiet --package wafer-cli --"
+wafer = "run --quiet --release --package wafer-cli --"
 # `cargo app` opens the desktop app on the chips/ folder.
 app = "run --release --package wafer-app --"

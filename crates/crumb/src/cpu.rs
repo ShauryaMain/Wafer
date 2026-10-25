@@ -144,7 +144,9 @@ impl Machine {
         }
     }
 
-    fn write(&mut self, addr: u16, value: u16) {
+    /// What a store to `addr` does: RAM and the screen keep it, the LEDs and
+    /// number display show it, and the console prints it.
+    pub fn write(&mut self, addr: u16, value: u16) {
         let a = usize::from(addr);
         match addr {
             0x2000..0x4000 => self.ram[a - usize::from(RAM_START)] = value,
@@ -156,8 +158,10 @@ impl Machine {
         }
     }
 
-    /// One clock tick passes.
-    fn tick(&mut self) {
+    /// One clock tick passes for the console: the frame counter and the
+    /// random-number LFSR move on. [`Self::step`] does this twice; a
+    /// gate-level CPU using this machine as its memory calls it itself.
+    pub fn tick(&mut self) {
         self.ticks += 1;
         // Galois LFSR, taps 0xB400.
         let bit = self.lfsr & 1;

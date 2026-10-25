@@ -1585,3 +1585,165 @@ fn builds_sequencer() {
     let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "Sequencer");
     assert!(results.passed(), "Sequencer's tests fail:\n{text}");
 }
+
+/// Builds Crumb on the canvas the way the guide in the chat says to, then
+/// runs hello.asm on it next to the reference Crumb.
+#[test]
+fn builds_crumb() {
+    let dir = example_project("crumb");
+    let ports = "  in  reset, mem_in[16]\n  out addr[16], mem_out[16], write\n  out execute, pc[13], t[16], r[16]\n";
+    reset_chip(&dir, "Crumb", ports);
+    let mut h = open_sized(&dir, egui::vec2(2600.0, 1900.0));
+    h.state_mut().state.open_chip("Crumb");
+    h.run_steps(3);
+
+    // Step 1: the parts, laid out in columns like dragging them into place.
+    let c = h.state().state.canvas.rect().center();
+    let parts = [
+        "Not",
+        "Register16",
+        "Decode",
+        "Sequencer",
+        "ALU16",
+        "Mux",
+        "Register16",
+        "Stack",
+        "Mux",
+        "Or",
+        "Stack",
+        "Mux",
+        "And",
+    ];
+    for (i, part) in parts.into_iter().enumerate() {
+        let (col, row) = ((i % 5) as f32, (i / 5) as f32);
+        add(&mut h, c + vec2(-500.0 + col * 220.0, -300.0 + row * 250.0), part);
+    }
+    let grid = [
+        ("in:reset", (0.0, 0.0)),
+        ("in:mem_in", (0.0, 260.0)),
+        ("not1", (260.0, 0.0)),
+        ("register16_1", (260.0, 160.0)),
+        ("decode1", (260.0, 380.0)),
+        ("sequencer1", (560.0, 0.0)),
+        ("alu16_1", (560.0, 380.0)),
+        ("mux1", (560.0, 620.0)),
+        ("register16_2", (840.0, 600.0)),
+        ("stack1", (840.0, 800.0)),
+        ("mux2", (560.0, 1000.0)),
+        ("or1", (560.0, 1140.0)),
+        ("stack2", (840.0, 1040.0)),
+        ("mux3", (1120.0, 100.0)),
+        ("and1", (1120.0, 300.0)),
+        ("out:addr", (1400.0, 100.0)),
+        ("out:mem_out", (1400.0, 220.0)),
+        ("out:write", (1400.0, 340.0)),
+        ("out:execute", (1400.0, 460.0)),
+        ("out:pc", (1400.0, 580.0)),
+        ("out:t", (1400.0, 700.0)),
+        ("out:r", (1400.0, 820.0)),
+    ];
+    let positions = grid.iter().map(|(k, at)| (k.to_string(), *at)).collect();
+    h.state_mut().state.ws.move_nodes("Crumb", positions);
+    h.run_steps(2);
+    h.hover_at(c);
+    h.run_steps(1);
+    h.key_press(Key::F);
+    h.run_steps(3);
+
+    // Decode's outputs, in order.
+    let dec = |name: &str| {
+        let outs = ["lit", "value", "jump", "jz", "call", "addr", "ret", "op", "t_to_n", "t_to_r", "store", "rd", "dd"];
+        ("decode1", outs.iter().position(|o| *o == name).unwrap())
+    };
+    let (execute, pc, pc1) = (("sequencer1", 0), ("sequencer1", 1), ("sequencer1", 2));
+    let (t, n, r) = (("register16_2", 0), ("stack1", 0), ("stack2", 0));
+    // Step 2: the instruction register loads in fetch ticks, and Decode reads it.
+    connect(&mut h, execute, ("not1", 0), None);
+    connect(&mut h, ("in:mem_in", 0), ("register16_1", 0), None);
+    connect(&mut h, ("not1", 0), ("register16_1", 1), None);
+    connect(&mut h, ("in:reset", 0), ("register16_1", 2), None);
+    connect(&mut h, ("register16_1", 0), ("decode1", 0), None);
+    // Step 3: the Sequencer.
+    connect(&mut h, ("in:reset", 0), ("sequencer1", 0), None);
+    connect(&mut h, dec("jump"), ("sequencer1", 1), None);
+    connect(&mut h, dec("jz"), ("sequencer1", 2), None);
+    connect(&mut h, dec("ret"), ("sequencer1", 3), None);
+    connect(&mut h, t, ("sequencer1", 4), None);
+    connect(&mut h, r, ("sequencer1", 5), None);
+    connect(&mut h, dec("addr"), ("sequencer1", 6), None);
+    // Step 4: the ALU, and the new T: the ALU's answer, or a literal's value.
+    connect(&mut h, t, ("alu16_1", 0), None);
+    connect(&mut h, n, ("alu16_1", 1), None);
+    connect(&mut h, r, ("alu16_1", 2), None);
+    connect(&mut h, ("in:mem_in", 0), ("alu16_1", 3), None);
+    connect(&mut h, dec("op"), ("alu16_1", 4), None);
+    connect(&mut h, ("alu16_1", 0), ("mux1", 0), None);
+    connect(&mut h, dec("value"), ("mux1", 1), None);
+    connect(&mut h, dec("lit"), ("mux1", 2), None);
+    connect(&mut h, ("mux1", 0), ("register16_2", 0), None);
+    connect(&mut h, execute, ("register16_2", 1), None);
+    connect(&mut h, ("in:reset", 0), ("register16_2", 2), None);
+    // Step 5: the data stack pushes T.
+    connect(&mut h, t, ("stack1", 0), None);
+    connect(&mut h, dec("t_to_n"), ("stack1", 1), None);
+    connect(&mut h, dec("dd"), ("stack1", 2), None);
+    connect(&mut h, execute, ("stack1", 3), None);
+    connect(&mut h, ("in:reset", 0), ("stack1", 4), None);
+    // Step 6: the return stack pushes T, or the return address on a call.
+    connect(&mut h, t, ("mux2", 0), None);
+    connect(&mut h, pc1, ("mux2", 1), Some("mux2.b[12:0]"));
+    connect(&mut h, dec("call"), ("mux2", 2), None);
+    connect(&mut h, dec("t_to_r"), ("or1", 0), None);
+    connect(&mut h, dec("call"), ("or1", 1), None);
+    connect(&mut h, ("mux2", 0), ("stack2", 0), None);
+    connect(&mut h, ("or1", 0), ("stack2", 1), None);
+    connect(&mut h, dec("rd"), ("stack2", 2), None);
+    connect(&mut h, execute, ("stack2", 3), None);
+    connect(&mut h, ("in:reset", 0), ("stack2", 4), None);
+    // Step 7: the bus: PC while fetching, T while executing; stores only in execute.
+    connect(&mut h, t, ("mux3", 1), None);
+    connect(&mut h, pc, ("mux3", 0), Some("mux3.a[12:0]"));
+    connect(&mut h, execute, ("mux3", 2), None);
+    connect(&mut h, dec("store"), ("and1", 0), None);
+    connect(&mut h, execute, ("and1", 1), None);
+    // Step 8: the outputs.
+    for (from, to) in [
+        (("mux3", 0), "out:addr"),
+        (n, "out:mem_out"),
+        (("and1", 0), "out:write"),
+        (execute, "out:execute"),
+        (pc, "out:pc"),
+        (t, "out:t"),
+        (r, "out:r"),
+    ] {
+        connect(&mut h, from, (to, 0), None);
+    }
+    shot(&mut h, "crumb");
+
+    let text = chip_text(&dir, "Crumb.chip");
+    for line in [
+        "not1 = Not(sequencer1.execute)",
+        "register16_1 = Register16(mem_in, not1, reset)",
+        "decode1 = Decode(register16_1)",
+        "sequencer1 = Sequencer(reset, decode1.jump, decode1.jz, decode1.ret, register16_2, stack2, decode1.addr)",
+        "alu16_1 = ALU16(register16_2, stack1, stack2, mem_in, decode1.op)",
+        "mux1 = Mux(alu16_1, decode1.value, decode1.lit)",
+        "register16_2 = Register16(mux1, sequencer1.execute, reset)",
+        "stack1 = Stack(register16_2, decode1.t_to_n, decode1.dd, sequencer1.execute, reset)",
+        "mux2 = Mux(register16_2, {0b000, sequencer1.pc1}, decode1.call)",
+        "or1 = Or(decode1.t_to_r, decode1.call)",
+        "stack2 = Stack(mux2, or1, decode1.rd, sequencer1.execute, reset)",
+        "mux3 = Mux({0b000, sequencer1.pc}, register16_2, sequencer1.execute)",
+        "and1 = And(decode1.store, sequencer1.execute)",
+    ] {
+        assert!(text.contains(line), "missing `{line}`:\n{text}");
+    }
+    let ws = &h.state().state.ws;
+    assert!(wafer_app::simrun::TestResults::run(ws, "Crumb").passed(), "Crumb's tests fail:\n{text}");
+    // And it runs a real program exactly like the reference.
+    let hello = std::fs::read_to_string(dir.join("hello.asm")).unwrap();
+    let program = crumb::assemble(&hello).unwrap();
+    let run = wafer_core::lockstep::lockstep(&ws.design, "Crumb", &program.words, 10_000, 16384)
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert!(run.halted && run.instructions == 164, "{run:?}");
+}
