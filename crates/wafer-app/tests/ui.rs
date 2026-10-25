@@ -1951,3 +1951,68 @@ fn builds_ports() {
     let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "Ports");
     assert!(results.passed(), "Ports' tests fail:\n{text}");
 }
+
+/// Builds FrameCounter on the canvas the way the guide in the chat says to.
+#[test]
+fn builds_frame_counter() {
+    let dir = example_project("frame_counter");
+    reset_chip(&dir, "FrameCounter", "  in  reset\n  out frame[16]\n");
+    let mut h = open_sized(&dir, egui::vec2(2000.0, 1400.0));
+    h.state_mut().state.open_chip("FrameCounter");
+    h.run_steps(3);
+    let c = h.state().state.canvas.rect().center();
+    for (part, at) in [
+        // The ticks of this frame...
+        ("Add16", vec2(-320.0, -180.0)),
+        ("Register16", vec2(-100.0, -180.0)),
+        ("Match16", vec2(120.0, -180.0)),
+        ("Or", vec2(320.0, -60.0)),
+        // ...and the frames.
+        ("Add16", vec2(-320.0, 180.0)),
+        ("Register16", vec2(-100.0, 180.0)),
+    ] {
+        add(&mut h, c + at, part);
+    }
+    h.hover_at(c);
+    h.run_steps(1);
+    h.key_press(Key::F);
+    h.run_steps(3);
+
+    // Part 1: count the ticks of this frame, back to 0 after 4095.
+    connect(&mut h, ("register16_1", 0), ("add16_1", 0), None);
+    pin_menu(&mut h, ("add16_1", 1), "Set to 1 (0x0001)");
+    pin_menu(&mut h, ("add16_1", 2), "Set to 0");
+    connect(&mut h, ("add16_1", 0), ("register16_1", 0), None);
+    pin_menu(&mut h, ("register16_1", 1), "Set to 1");
+    connect(&mut h, ("register16_1", 0), ("match16_1", 0), None);
+    pin_menu(&mut h, ("match16_1", 1), "Set to all 1s (0xFFFF)");
+    pin_number(&mut h, ("match16_1", 2), "0x0FFF");
+    connect(&mut h, ("match16_1", 0), ("or1", 0), None);
+    connect(&mut h, ("in:reset", 0), ("or1", 1), None);
+    connect(&mut h, ("or1", 0), ("register16_1", 2), None);
+
+    // Part 2: count the frames, up by 1 each time the ticks go back to 0.
+    connect(&mut h, ("register16_2", 0), ("add16_2", 0), None);
+    pin_menu(&mut h, ("add16_2", 1), "Set to 1 (0x0001)");
+    pin_menu(&mut h, ("add16_2", 2), "Set to 0");
+    connect(&mut h, ("add16_2", 0), ("register16_2", 0), None);
+    connect(&mut h, ("match16_1", 0), ("register16_2", 1), None);
+    connect(&mut h, ("in:reset", 0), ("register16_2", 2), None);
+    connect(&mut h, ("register16_2", 0), ("out:frame", 0), None);
+    shot(&mut h, "frame_counter");
+
+    let text = chip_text(&dir, "FrameCounter.chip");
+    for line in [
+        "add16_1 = Add16(register16_1, 1, 0)",
+        "register16_1 = Register16(add16_1.sum, 1, or1)",
+        "match16_1 = Match16(register16_1, 0xFFFF, 0x0FFF)",
+        "or1 = Or(match16_1, reset)",
+        "add16_2 = Add16(register16_2, 1, 0)",
+        "register16_2 = Register16(add16_2.sum, match16_1, reset)",
+        "frame = register16_2",
+    ] {
+        assert!(text.contains(line), "missing `{line}`:\n{text}");
+    }
+    let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "FrameCounter");
+    assert!(results.passed(), "FrameCounter's tests fail:\n{text}");
+}

@@ -1,0 +1,46 @@
+// Counts frames: `frame` goes up by 1 every 4096 clock ticks
+// (TICKS_PER_FRAME in docs/crumb.md), wrapping at 16 bits. `reset` starts
+// it again at 0, at the start of a frame. The Console's FRAME port reads
+// it, and games wait for it to change.
+//
+// Two counters: one counts the ticks of this frame, 0 to 4095, and goes
+// back to 0 when it gets past 4095; the other counts the frames, going up
+// each time the first goes back to 0.
+chip FrameCounter {
+  in  reset
+  out frame[16]
+  add16_1 = Add16(register16_1, 1, 0)
+  register16_1 = Register16(add16_1.sum, 1, or1)
+  match16_1 = Match16(register16_1, 0xFFFF, 0x0FFF)
+  or1 = Or(match16_1, reset)
+  add16_2 = Add16(register16_2, 1, 0)
+  register16_2 = Register16(add16_2.sum, match16_1, reset)
+  frame = register16_2
+}
+
+test FrameCounter {
+  set reset = 1
+  tick
+  set reset = 0
+  expect frame = 0
+  tick 4095
+  expect frame = 0          // 4095 ticks: still the first frame
+  tick
+  expect frame = 1          // the 4096th tick starts frame 1
+  tick 4095
+  expect frame = 1
+  tick
+  expect frame = 2
+  tick 8192
+  expect frame = 4          // two more whole frames
+  // Reset in the middle of a frame starts again from the very start.
+  tick 1000
+  set reset = 1
+  tick
+  set reset = 0
+  expect frame = 0
+  tick 4095
+  expect frame = 0          // a whole frame again, not what was left of one
+  tick
+  expect frame = 1
+}
