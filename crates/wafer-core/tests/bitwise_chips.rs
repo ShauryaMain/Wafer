@@ -59,6 +59,16 @@ fn copies_follow_the_wires_and_numbers() {
     // Nothing wired yet: one copy.
     let d = design("chip T {\n out y\n y = Xor()\n}");
     assert!(!d.has_errors(), "{:#?}", d.diagnostics);
+    // A gate fed by a spread chip that also takes numbers: the signal sets
+    // the copies, and the gate takes the chip's width.
+    let d = design("chip T {\n in x[16], s\n out y[16]\n m = And(0x00FF, x)\n y = Mux(m, 0x0081, s)\n}");
+    assert!(!d.has_errors(), "{:#?}", d.diagnostics);
+    assert_eq!(run(&d, "T", &[(0x1234, 16), (0, 1)], "y"), Some(0x0034));
+    // Only 1-bit signals: the widest number sets the copies.
+    let d = design("chip T {\n in s\n out y[3]\n m = And(0b101, s)\n y = Mux(m, 0, s)\n}");
+    assert!(!d.has_errors(), "{:#?}", d.diagnostics);
+    assert_eq!(run(&d, "T", &[(1, 1)], "y"), Some(0));
+    assert_eq!(run(&d, "T", &[(0, 1)], "y"), Some(0));
 }
 
 #[test]

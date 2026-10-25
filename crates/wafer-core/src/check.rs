@@ -769,14 +769,20 @@ impl BodyCheck<'_> {
     }
 
     /// How many copies a bitwise chip needs, from what's wired to it: the
-    /// first input wider than 1 bit decides. `None` while an input's width
-    /// is unknown.
+    /// first signal wider than 1 bit decides, and if every signal is 1 bit,
+    /// the widest number. `None` while a signal's width is unknown.
     fn copies_from_inputs(&self, index: usize) -> Option<usize> {
         let mut widths = Vec::new();
+        let mut widest_number = 1;
         for expr in self.info.instances[index].inputs.iter().flatten() {
+            // A number fits any width, so it only decides when nothing else does.
+            if let ExprKind::Literal(lit) = &expr.kind {
+                widest_number = widest_number.max(lit.natural_width());
+                continue;
+            }
             widths.push(self.quiet_width(expr, false)?);
         }
-        widths.into_iter().find(|&w| w > 1).or(Some(1))
+        widths.into_iter().find(|&w| w > 1).or(Some(widest_number))
     }
 
     /// Checks an expression, reporting mistakes, and returns its width.

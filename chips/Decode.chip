@@ -1,0 +1,94 @@
+// Works out what an instruction tells Crumb to do (docs/crumb.md has the
+// encoding). The top bits give its kind:
+//
+//   1vvv vvvv vvvv vvvv  literal: push v           (lit)
+//   000a aaaa aaaa aaaa  jump to a                 (jump)
+//   001a aaaa aaaa aaaa  pop; jump to a if it was 0 (jz)
+//   010a aaaa aaaa aaaa  call a                    (call, and jump)
+//   011. .... .... ....  ALU instruction
+//
+// An ALU instruction's low 13 bits are already Crumb's control signals:
+// return (ret), the ALU op, T->N, T->R, store, and how each stack moves
+// (rd, dd). Every other kind acts like an ALU instruction too: a jump is
+// `T` with nothing moving, jz is `N` popping one, a call pushes on the
+// return stack, and a literal pushes on the data stack. So these outputs
+// work for every instruction.
+chip Decode {
+  in  insn[16]
+  out lit, value[16], jump, jz, call, addr[13]
+  out ret, op[4], t_to_n, t_to_r, store, rd[2], dd[2]
+  mux4_1 = Mux4(0x0000, 0x0103, 0x0004, insn, insn[13], insn[14])
+  mux1 = Mux(mux4_1, 0x0081, insn[15])
+  mux4_2 = Mux4(0b001, 0b010, 0b101, 0, insn[13], insn[14])
+  mux2 = Mux(mux4_2, 0, insn[15])
+  and1 = And(insn, 0x7FFF)
+  lit = insn[15]
+  value = and1
+  addr = insn[12:0]
+  jump = mux2[0]
+  jz = mux2[1]
+  call = mux2[2]
+  ret = mux1[12]
+  op = mux1[11:8]
+  t_to_n = mux1[7]
+  t_to_r = mux1[6]
+  store = mux1[5]
+  rd = mux1[3:2]
+  dd = mux1[1:0]
+}
+
+test Decode {
+  // lit 5
+  set insn = 0x8005
+  expect lit = 1, jump = 0, jz = 0, call = 0
+  expect value = 0x0005
+  expect op = 0, t_to_n = 1, t_to_r = 0, store = 0, ret = 0, rd = 0b00, dd = 0b01
+  // lit 0x7FFF, the biggest literal
+  set insn = 0xFFFF
+  expect lit = 1, jump = 0, jz = 0, call = 0
+  expect value = 0x7FFF
+  expect op = 0, t_to_n = 1, t_to_r = 0, store = 0, ret = 0, rd = 0b00, dd = 0b01
+  // jump 0x1234
+  set insn = 0x1234
+  expect lit = 0, jump = 1, jz = 0, call = 0
+  expect addr = 0x1234
+  expect op = 0, t_to_n = 0, t_to_r = 0, store = 0, ret = 0, rd = 0b00, dd = 0b00
+  // jz 0x0042
+  set insn = 0x2042
+  expect lit = 0, jump = 0, jz = 1, call = 0
+  expect addr = 0x0042
+  expect op = 1, t_to_n = 0, t_to_r = 0, store = 0, ret = 0, rd = 0b00, dd = 0b11
+  // call 0x0100: a call also jumps
+  set insn = 0x4100
+  expect lit = 0, jump = 1, jz = 0, call = 1
+  expect addr = 0x0100
+  expect op = 0, t_to_n = 0, t_to_r = 0, store = 0, ret = 0, rd = 0b01, dd = 0b00
+  // +
+  set insn = 0x6203
+  expect lit = 0, jump = 0, jz = 0, call = 0
+  expect op = 2, t_to_n = 0, t_to_r = 0, store = 0, ret = 0, rd = 0b00, dd = 0b11
+  // dup
+  set insn = 0x6081
+  expect lit = 0, jump = 0, jz = 0, call = 0
+  expect op = 0, t_to_n = 1, t_to_r = 0, store = 0, ret = 0, rd = 0b00, dd = 0b01
+  // >r
+  set insn = 0x6147
+  expect lit = 0, jump = 0, jz = 0, call = 0
+  expect op = 1, t_to_n = 0, t_to_r = 1, store = 0, ret = 0, rd = 0b01, dd = 0b11
+  // exit
+  set insn = 0x700C
+  expect lit = 0, jump = 0, jz = 0, call = 0
+  expect op = 0, t_to_n = 0, t_to_r = 0, store = 0, ret = 1, rd = 0b11, dd = 0b00
+  // store (the first half of !)
+  set insn = 0x6123
+  expect lit = 0, jump = 0, jz = 0, call = 0
+  expect op = 1, t_to_n = 0, t_to_r = 0, store = 1, ret = 0, rd = 0b00, dd = 0b11
+  // @
+  set insn = 0x6D00
+  expect lit = 0, jump = 0, jz = 0, call = 0
+  expect op = 13, t_to_n = 0, t_to_r = 0, store = 0, ret = 0, rd = 0b00, dd = 0b00
+  // + ; (an add merged with a return)
+  set insn = 0x720F
+  expect lit = 0, jump = 0, jz = 0, call = 0
+  expect op = 2, t_to_n = 0, t_to_r = 0, store = 0, ret = 1, rd = 0b11, dd = 0b11
+}

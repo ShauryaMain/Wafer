@@ -708,6 +708,7 @@ impl Canvas {
             sink_label,
             sink_width,
             sink_adapts,
+            sink_spread: spread,
             source,
             source_width,
             screen: at,
@@ -738,6 +739,16 @@ impl Canvas {
         let mut placed: Option<FreePick> = None;
         let mut pick = picker.free.unwrap_or(FreePick { hi: 0, lo: 0, at: 0 });
         ui.label(format!("Wire bits of {} into {}", picker.source, picker.sink_label));
+        if picker.sink_spread && sw > 1 && sw <= 32 {
+            ui.label(egui::RichText::new("One bit for every copy:").color(theme::MUTED).small());
+            ui.horizontal_wrapped(|ui| {
+                for bit in (0..sw).rev() {
+                    if button(ui, &slice(bit, bit)) {
+                        whole = Some((bit, bit));
+                    }
+                }
+            });
+        }
         if picker.sink_adapts && sw > 1 {
             // The pin takes any width: the usual picks are a half or an end bit.
             let mut picks = vec![(sw - 1, sw - 1)];
@@ -1637,6 +1648,9 @@ struct BitPicker {
     /// The pin takes whatever width is wired to it (a fresh gate or 1-bit
     /// chip), so any bits can go in, starting at bit 0.
     sink_adapts: bool,
+    /// The pin belongs to a 1-bit chip spread across a bus, so one bit of
+    /// the source can feed every copy.
+    sink_spread: bool,
     /// As written in the file: `a`, `lo.sum`.
     source: String,
     source_width: usize,

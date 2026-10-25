@@ -1247,3 +1247,193 @@ fn builds_inc13_from_add16() {
     let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "Inc13");
     assert!(results.passed(), "Inc13's tests fail:\n{text}");
 }
+
+/// Drags from an output pin to an input pin, then clicks `pick` in the
+/// bit picker if one is given.
+fn connect(h: &mut Harness<'static, WaferApp>, from: (&str, usize), to: (&str, usize), pick: Option<&str>) {
+    let (a, b) = (pin(h, from.0, true, from.1), pin(h, to.0, false, to.1));
+    drag(h, a, b);
+    if let Some(label) = pick {
+        h.get_by_label(label).click();
+        h.run_steps(3);
+    }
+}
+
+/// Option-drags from an output pin to an input pin and clicks `pick`.
+fn option_connect(h: &mut Harness<'static, WaferApp>, from: (&str, usize), to: (&str, usize), pick: &str) {
+    let (a, b) = (pin(h, from.0, true, from.1), pin(h, to.0, false, to.1));
+    h.event(Event::ModifiersChanged(Modifiers::ALT));
+    drag(h, a, b);
+    h.event(Event::ModifiersChanged(Modifiers::NONE));
+    h.run_steps(1);
+    h.get_by_label(pick).click();
+    h.run_steps(3);
+}
+
+/// Right-clicks an input pin and picks `item` from its menu.
+fn pin_menu(h: &mut Harness<'static, WaferApp>, to: (&str, usize), item: &str) {
+    let at = pin(h, to.0, false, to.1);
+    right_click(h, at);
+    h.get_by_label(item).click();
+    h.run_steps(3);
+}
+
+/// Right-clicks an input pin and types a number into its Set to field.
+fn pin_number(h: &mut Harness<'static, WaferApp>, to: (&str, usize), value: &str) {
+    let at = pin(h, to.0, false, to.1);
+    right_click(h, at);
+    h.get(by().label("Set to").role(egui::accesskit::Role::TextInput)).focus();
+    h.run_steps(1);
+    h.event(Event::Text(value.into()));
+    h.run_steps(1);
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+}
+
+/// Builds StackPointer on the canvas the way the guide in the chat says to.
+#[test]
+fn builds_stack_pointer() {
+    let dir = example_project("stack_pointer");
+    reset_chip(&dir, "StackPointer", "  in  delta[2], move, reset\n  out sp[5]\n");
+    let mut h = open(&dir);
+    h.state_mut().state.open_chip("StackPointer");
+    h.run_steps(3);
+
+    // Step 1: the parts, left to right.
+    let c = h.state().state.canvas.rect().center();
+    for (part, x) in [("Mux4", -300.0), ("Add8", -130.0), ("Mux", 30.0), ("Mux", 160.0), ("Dff", 290.0)] {
+        add(&mut h, c + vec2(x, 0.0), part);
+    }
+    h.hover_at(c);
+    h.run_steps(1);
+    h.key_press(Key::F);
+    h.run_steps(3);
+
+    // Step 2: how far to move, picked by delta.
+    pin_number(&mut h, ("mux4_1", 0), "0x00");
+    pin_menu(&mut h, ("mux4_1", 1), "Set to 1 (0x01)");
+    pin_number(&mut h, ("mux4_1", 2), "0xFE");
+    pin_menu(&mut h, ("mux4_1", 3), "Set to all 1s (0xFF)");
+    connect(&mut h, ("in:delta", 0), ("mux4_1", 4), Some("delta[0]"));
+    connect(&mut h, ("in:delta", 0), ("mux4_1", 5), Some("delta[1]"));
+    // Step 3: add it to where the pointer is now.
+    connect(&mut h, ("dff1", 0), ("add8_1", 0), None);
+    connect(&mut h, ("mux4_1", 0), ("add8_1", 1), None);
+    pin_menu(&mut h, ("add8_1", 2), "Set to 0");
+    // Step 4: move or stay, then reset.
+    connect(&mut h, ("add8_1", 0), ("mux1", 1), None);
+    connect(&mut h, ("dff1", 0), ("mux1", 0), None);
+    connect(&mut h, ("in:move", 0), ("mux1", 2), None);
+    connect(&mut h, ("mux1", 0), ("mux2", 0), None);
+    pin_menu(&mut h, ("mux2", 1), "Set to 0");
+    connect(&mut h, ("in:reset", 0), ("mux2", 2), None);
+    // Step 5: remember it, and show the low 5 bits.
+    connect(&mut h, ("mux2", 0), ("dff1", 0), None);
+    connect(&mut h, ("dff1", 0), ("out:sp", 0), Some("dff1[4:0]"));
+    shot(&mut h, "stack_pointer");
+
+    let text = chip_text(&dir, "StackPointer.chip");
+    for line in [
+        "mux4_1 = Mux4(0x00, 1, 0xFE, 0xFF, delta[0], delta[1])",
+        "add8_1 = Add8(dff1, mux4_1, 0)",
+        "mux1 = Mux(dff1, add8_1.sum, move)",
+        "mux2 = Mux(mux1, 0, reset)",
+        "dff1 = Dff(mux2)",
+        "sp = dff1[4:0]",
+    ] {
+        assert!(text.contains(line), "missing `{line}`:\n{text}");
+    }
+    let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "StackPointer");
+    assert!(results.passed(), "StackPointer's tests fail:\n{text}");
+}
+
+/// Builds Decode on the canvas the way the guide in the chat says to.
+#[test]
+fn builds_decode() {
+    let dir = example_project("decode");
+    let ports = "  in  insn[16]\n  out lit, value[16], jump, jz, call, addr[13]\n  out ret, op[4], t_to_n, t_to_r, store, rd[2], dd[2]\n";
+    reset_chip(&dir, "Decode", ports);
+    let mut h = open_sized(&dir, egui::vec2(2000.0, 1400.0));
+    h.state_mut().state.open_chip("Decode");
+    h.run_steps(3);
+
+    // Step 1: the parts.
+    let c = h.state().state.canvas.rect().center();
+    for (part, at) in [
+        ("Mux4", vec2(-250.0, -220.0)),
+        ("Mux", vec2(-50.0, -200.0)),
+        ("Mux4", vec2(-250.0, 60.0)),
+        ("Mux", vec2(-50.0, 80.0)),
+        ("And", vec2(-250.0, 300.0)),
+    ] {
+        add(&mut h, c + at, part);
+    }
+    h.hover_at(c);
+    h.run_steps(1);
+    h.key_press(Key::F);
+    h.run_steps(3);
+
+    // Step 2: the control word, as if every instruction were an ALU one.
+    connect(&mut h, ("in:insn", 0), ("mux4_1", 3), None);
+    pin_number(&mut h, ("mux4_1", 0), "0x0000");
+    pin_number(&mut h, ("mux4_1", 1), "0x0103");
+    pin_number(&mut h, ("mux4_1", 2), "0x0004");
+    option_connect(&mut h, ("in:insn", 0), ("mux4_1", 4), "insn[13]");
+    option_connect(&mut h, ("in:insn", 0), ("mux4_1", 5), "insn[14]");
+    connect(&mut h, ("mux4_1", 0), ("mux1", 0), None);
+    pin_number(&mut h, ("mux1", 1), "0x0081");
+    connect(&mut h, ("in:insn", 0), ("mux1", 2), Some("insn[15]"));
+    // Step 3: which kind of jump, if any.
+    pin_number(&mut h, ("mux4_2", 0), "0b001");
+    pin_number(&mut h, ("mux4_2", 1), "0b010");
+    pin_number(&mut h, ("mux4_2", 2), "0b101");
+    pin_menu(&mut h, ("mux4_2", 3), "Set to 0");
+    connect(&mut h, ("in:insn", 0), ("mux4_2", 4), Some("insn[13]"));
+    connect(&mut h, ("in:insn", 0), ("mux4_2", 5), Some("insn[14]"));
+    connect(&mut h, ("mux4_2", 0), ("mux2", 0), None);
+    pin_menu(&mut h, ("mux2", 1), "Set to 0");
+    connect(&mut h, ("in:insn", 0), ("mux2", 2), Some("insn[15]"));
+    // Step 4: a literal's value is the instruction without its top bit.
+    connect(&mut h, ("in:insn", 0), ("and1", 0), None);
+    pin_number(&mut h, ("and1", 1), "0x7FFF");
+    // Step 5: every output is a slice.
+    let outputs = [
+        ("in:insn", "out:lit", Some("insn[15]")),
+        ("and1", "out:value", None),
+        ("in:insn", "out:addr", Some("insn[12:0]")),
+        ("mux2", "out:jump", Some("mux2[0]")),
+        ("mux2", "out:jz", Some("mux2[1]")),
+        ("mux2", "out:call", Some("mux2[2]")),
+        ("mux1", "out:ret", Some("mux1[12]")),
+        ("mux1", "out:op", Some("mux1[11:8]")),
+        ("mux1", "out:t_to_n", Some("mux1[7]")),
+        ("mux1", "out:t_to_r", Some("mux1[6]")),
+        ("mux1", "out:store", Some("mux1[5]")),
+        ("mux1", "out:rd", Some("mux1[3:2]")),
+        ("mux1", "out:dd", Some("mux1[1:0]")),
+    ];
+    for (from, to, pick) in outputs {
+        connect(&mut h, (from, 0), (to, 0), pick);
+    }
+    shot(&mut h, "decode");
+
+    let text = chip_text(&dir, "Decode.chip");
+    for line in [
+        "mux4_1 = Mux4(0x0000, 0x0103, 0x0004, insn, insn[13], insn[14])",
+        "mux1 = Mux(mux4_1, 0x0081, insn[15])",
+        "mux4_2 = Mux4(0b001, 0b010, 0b101, 0, insn[13], insn[14])",
+        "mux2 = Mux(mux4_2, 0, insn[15])",
+        "and1 = And(insn, 0x7FFF)",
+        "lit = insn[15]",
+        "value = and1",
+        "addr = insn[12:0]",
+        "jump = mux2[0]",
+        "call = mux2[2]",
+        "op = mux1[11:8]",
+        "dd = mux1[1:0]",
+    ] {
+        assert!(text.contains(line), "missing `{line}`:\n{text}");
+    }
+    let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "Decode");
+    assert!(results.passed(), "Decode's tests fail:\n{text}");
+}
