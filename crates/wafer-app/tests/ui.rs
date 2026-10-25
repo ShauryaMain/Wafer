@@ -1839,3 +1839,115 @@ fn builds_match16_and_address_decoder() {
     let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "AddressDecoder");
     assert!(results.passed(), "AddressDecoder's tests fail:\n{text}");
 }
+
+/// Builds Ports on the canvas the way the guide in the chat says to.
+#[test]
+fn builds_ports() {
+    let dir = example_project("ports");
+    reset_chip(
+        &dir,
+        "Ports",
+        "  in  addr[16], io, write, data[16], reset, pad[8], frame[16], random[16], switches[16]\n  out out[16], leds[16], number[16], char[8], print\n",
+    );
+    let mut h = open_sized(&dir, egui::vec2(2400.0, 1600.0));
+    h.state_mut().state.open_chip("Ports");
+    h.run_steps(3);
+    let c = h.state().state.canvas.rect().center();
+    for (part, at) in [
+        // Writing: which register a store is for.
+        ("And", vec2(-150.0, -420.0)),
+        ("Mux4", vec2(-350.0, -330.0)),
+        ("Mux4", vec2(-350.0, -60.0)),
+        ("Mux", vec2(-150.0, -200.0)),
+        ("And", vec2(20.0, -300.0)),
+        ("Register16", vec2(220.0, -420.0)),
+        ("Register16", vec2(220.0, -200.0)),
+        // Reading: which port `out` shows.
+        ("Mux4", vec2(-80.0, 220.0)),
+        ("Mux4", vec2(110.0, 220.0)),
+        ("Mux", vec2(300.0, 220.0)),
+        ("Mux", vec2(450.0, 220.0)),
+    ] {
+        add(&mut h, c + at, part);
+    }
+    h.hover_at(c);
+    h.run_steps(1);
+    h.key_press(Key::F);
+    h.run_steps(3);
+
+    // Part 1: writes.
+    connect(&mut h, ("in:io", 0), ("and1", 0), None);
+    connect(&mut h, ("in:write", 0), ("and1", 1), None);
+    for (mux, constants) in [("mux4_1", ["0", "0", "0", "0b001"]), ("mux4_2", ["0", "0b010", "0b100", "0"])] {
+        for (pin, value) in constants.into_iter().enumerate() {
+            match value {
+                "0" => pin_menu(&mut h, (mux, pin), "Set to 0"),
+                value => pin_number(&mut h, (mux, pin), value),
+            }
+        }
+        connect(&mut h, ("in:addr", 0), (mux, 4), Some("addr[0]"));
+        connect(&mut h, ("in:addr", 0), (mux, 5), Some("addr[1]"));
+    }
+    connect(&mut h, ("mux4_1", 0), ("mux1", 0), None);
+    connect(&mut h, ("mux4_2", 0), ("mux1", 1), None);
+    connect(&mut h, ("in:addr", 0), ("mux1", 2), Some("addr[2]"));
+    connect(&mut h, ("mux1", 0), ("and2", 0), None);
+    connect(&mut h, ("and1", 0), ("and2", 1), None);
+    for (register, bit) in [("register16_1", "and2[0]"), ("register16_2", "and2[1]")] {
+        connect(&mut h, ("in:data", 0), (register, 0), None);
+        connect(&mut h, ("and2", 0), (register, 1), Some(bit));
+        connect(&mut h, ("in:reset", 0), (register, 2), None);
+    }
+
+    // Part 2: reads.
+    connect(&mut h, ("in:frame", 0), ("mux4_3", 1), None);
+    connect(&mut h, ("in:random", 0), ("mux4_3", 2), None);
+    connect(&mut h, ("register16_1", 0), ("mux4_3", 3), None);
+    option_connect(&mut h, ("in:pad", 0), ("mux4_3", 0), "Connect");
+    connect(&mut h, ("in:switches", 0), ("mux4_4", 0), None);
+    connect(&mut h, ("register16_2", 0), ("mux4_4", 1), None);
+    pin_menu(&mut h, ("mux4_4", 2), "Set to 0");
+    pin_menu(&mut h, ("mux4_4", 3), "Set to 0");
+    // These are 16 copies wide, like `addr`, so a plain drag would give
+    // each copy its own bit: Option picks one bit for every copy.
+    for mux in ["mux4_3", "mux4_4"] {
+        option_connect(&mut h, ("in:addr", 0), (mux, 4), "addr[0]");
+        option_connect(&mut h, ("in:addr", 0), (mux, 5), "addr[1]");
+    }
+    connect(&mut h, ("mux4_3", 0), ("mux2", 0), None);
+    connect(&mut h, ("mux4_4", 0), ("mux2", 1), None);
+    connect(&mut h, ("in:addr", 0), ("mux2", 2), Some("addr[2]"));
+    pin_menu(&mut h, ("mux3", 0), "Set to 0");
+    connect(&mut h, ("mux2", 0), ("mux3", 1), None);
+    connect(&mut h, ("in:io", 0), ("mux3", 2), None);
+
+    // Part 3: the outputs.
+    connect(&mut h, ("mux3", 0), ("out:out", 0), None);
+    connect(&mut h, ("register16_1", 0), ("out:leds", 0), None);
+    connect(&mut h, ("register16_2", 0), ("out:number", 0), None);
+    connect(&mut h, ("in:data", 0), ("out:char", 0), Some("data[7:0]"));
+    connect(&mut h, ("and2", 0), ("out:print", 0), Some("and2[2]"));
+    shot(&mut h, "ports");
+
+    let text = chip_text(&dir, "Ports.chip");
+    for line in [
+        "and1 = And(io, write)",
+        "mux4_1 = Mux4(0, 0, 0, 0b001, addr[0], addr[1])",
+        "mux4_2 = Mux4(0, 0b010, 0b100, 0, addr[0], addr[1])",
+        "mux1 = Mux(mux4_1, mux4_2, addr[2])",
+        "and2 = And(mux1, and1)",
+        "register16_1 = Register16(data, and2[0], reset)",
+        "register16_2 = Register16(data, and2[1], reset)",
+        "mux4_3 = Mux4({0x00, pad}, frame, random, register16_1, addr[0], addr[1])",
+        "mux4_4 = Mux4(switches, register16_2, 0, 0, addr[0], addr[1])",
+        "mux2 = Mux(mux4_3, mux4_4, addr[2])",
+        "mux3 = Mux(0, mux2, io)",
+        "out = mux3",
+        "char = data[7:0]",
+        "print = and2[2]",
+    ] {
+        assert!(text.contains(line), "missing `{line}`:\n{text}");
+    }
+    let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "Ports");
+    assert!(results.passed(), "Ports' tests fail:\n{text}");
+}

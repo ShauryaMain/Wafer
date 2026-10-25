@@ -1,0 +1,100 @@
+// The Console's eight I/O ports, 0x6000-0x6007 (docs/crumb.md). `io` comes
+// from AddressDecoder: it's 1 when `addr` is one of them.
+//
+//   0x6000  PAD       read: the 8 buttons held (top 8 bits 0)
+//   0x6001  FRAME     read: `frame`, from FrameCounter
+//   0x6002  RANDOM    read: `random`, from Random
+//   0x6003  LEDS      read and write: a register, shown on `leds`
+//   0x6004  SWITCHES  read: `switches`
+//   0x6005  NUMBER    read and write: a register, shown on `number`
+//   0x6006  CONSOLE   write: `print` is 1 for that tick, with the low 8
+//                     bits on `char`. Reads 0
+//   0x6007  nothing   reads 0
+//
+// Reading is instant: `out` shows the port `addr` picks, or 0 when `io` is
+// 0, so the Console can use another device's word instead. A write lands
+// on the clock tick, and `reset` clears the LEDs and number.
+chip Ports {
+  in  addr[16], io, write, data[16], reset, pad[8], frame[16], random[16], switches[16]
+  out out[16], leds[16], number[16], char[8], print
+  and1 = And(io, write)
+  mux4_1 = Mux4(0, 0, 0, 0b001, addr[0], addr[1])
+  mux4_2 = Mux4(0, 0b010, 0b100, 0, addr[0], addr[1])
+  mux1 = Mux(mux4_1, mux4_2, addr[2])
+  and2 = And(mux1, and1)
+  register16_1 = Register16(data, and2[0], reset)
+  register16_2 = Register16(data, and2[1], reset)
+  mux4_3 = Mux4({0x00, pad}, frame, random, register16_1, addr[0], addr[1])
+  mux4_4 = Mux4(switches, register16_2, 0, 0, addr[0], addr[1])
+  mux2 = Mux(mux4_3, mux4_4, addr[2])
+  mux3 = Mux(0, mux2, io)
+  out = mux3
+  leds = register16_1
+  number = register16_2
+  char = data[7:0]
+  print = and2[2]
+}
+
+test Ports {
+  set addr = 0x6000, io = 1, write = 0, data = 0, reset = 1
+  set pad = 0b10010001, frame = 0x0007, random = 0xACE1, switches = 0x00F0
+  tick
+  set reset = 0
+  expect leds = 0, number = 0, print = 0
+  // Reading: each address shows its port straight away, no tick needed.
+  expect out = 0x0091          // PAD: the buttons, with the top 8 bits 0
+  set addr = 0x6001
+  expect out = 0x0007          // FRAME
+  set addr = 0x6002
+  expect out = 0xACE1          // RANDOM
+  set addr = 0x6004
+  expect out = 0x00F0          // SWITCHES
+  set addr = 0x6006
+  expect out = 0               // CONSOLE reads 0
+  set addr = 0x6007
+  expect out = 0               // nothing there
+  // Not a port: `out` is 0, whatever the low bits say.
+  set addr = 0x2001, io = 0
+  expect out = 0
+  // Write the LEDs. They change on the tick, and 0x6003 reads them back.
+  set addr = 0x6003, io = 1, write = 1, data = 0xBEEF
+  expect leds = 0, print = 0   // not until the tick
+  tick
+  expect leds = 0xBEEF, number = 0, out = 0xBEEF
+  // Without `write`, nothing changes.
+  set write = 0, data = 0x1234
+  tick
+  expect leds = 0xBEEF
+  // Write the number display.
+  set addr = 0x6005, write = 1, data = 0x0042
+  tick
+  expect number = 0x0042, leds = 0xBEEF, out = 0x0042
+  // Print: `print` is 1 while the CONSOLE write is happening, and `char`
+  // is the low 8 bits ('H').
+  set addr = 0x6006, data = 0x0A48
+  expect print = 1, char = 0x48
+  tick
+  expect leds = 0xBEEF, number = 0x0042   // printing stores nothing
+  set write = 0
+  expect print = 0
+  // Writes to the ports you can only read go nowhere.
+  set addr = 0x6000, write = 1, data = 0xFFFF
+  expect print = 0
+  tick
+  set addr = 0x6007
+  tick
+  expect leds = 0xBEEF, number = 0x0042
+  // A RAM address that ends in 3 isn't the LEDs, and one that ends in 6
+  // isn't the console: `io` is 0 for both.
+  set addr = 0x2003, io = 0, data = 0x5555
+  tick
+  set addr = 0x2006
+  expect print = 0
+  tick
+  expect leds = 0xBEEF, number = 0x0042
+  // Reset clears the LEDs and the number.
+  set write = 0, reset = 1
+  tick
+  set reset = 0
+  expect leds = 0, number = 0
+}
