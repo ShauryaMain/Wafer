@@ -1,0 +1,29 @@
+// 1 when `a` matches a pattern: the bits of `a` that `mask` has 1s for
+// equal `value` (the other bits don't matter). AddressDecoder uses four,
+// one per device, like "the top 3 bits are 001" for RAM.
+chip Match16 {
+  in  a[16], mask[16], value[16]
+  out eq
+  and1 = And(a, mask)
+  xor1 = Xor(and1, value)
+  or1 = Or(xor1[15:8], xor1[7:0])
+  or2 = Or(or1[7:4], or1[3:0])
+  or3 = Or(or2[3:2], or2[1:0])
+  or4 = Or(or3[1], or3[0])
+  not1 = Not(or4)
+  eq = not1
+}
+
+test Match16 {
+  // a      mask   value  | eq
+     0x1234 0xF000 0x1000 | 1   // only the top 4 bits are checked
+     0x2234 0xF000 0x1000 | 0
+     0x4123 0xFE00 0x4000 | 1   // the screen's range
+     0x4200 0xFE00 0x4000 | 0   // just past it
+     0x6005 0xFFF8 0x6000 | 1   // a port
+     0x6008 0xFFF8 0x6000 | 0
+     0xFFFF 0x0000 0x0000 | 1   // a mask of 0 checks nothing: always a match
+     0x0000 0xFFFF 0x0000 | 1
+     0x8000 0xFFFF 0x0000 | 0   // the top bit differs
+     0x0001 0xFFFF 0x0000 | 0   // the bottom bit differs
+}

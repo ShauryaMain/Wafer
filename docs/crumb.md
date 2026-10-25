@@ -58,7 +58,7 @@ A bit is 1 while its button is held. Bits 8–15 read 0.
 
 ### Frames and randomness
 
-- **`FRAME`** reads `ticks / TICKS_PER_FRAME` (wrapping at 16 bits), where `ticks` counts clock ticks since reset. `TICKS_PER_FRAME` is **16384 for now**; we'll set it for real once we've measured the gate-level CPU. A game waits for the next frame by reading `FRAME` until it changes.
+- **`FRAME`** reads `ticks / TICKS_PER_FRAME` (wrapping at 16 bits), where `ticks` counts clock ticks since reset. `TICKS_PER_FRAME` is **4096**, so every frame gets 2048 instructions. (We picked it after measuring the gate-level Crumb at about 100,000 ticks a second, so games run at a watchable speed even in gates.) A game waits for the next frame by reading `FRAME` until it changes.
 - **`RANDOM`** reads a 16-bit Galois LFSR (taps `0xB400`) that starts at `0xACE1` and steps once **every clock tick**, whether or not anyone reads it. Since players press buttons at unpredictable ticks, games still feel random, but a recorded run replays exactly.
 
 ## Timing

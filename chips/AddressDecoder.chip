@@ -1,0 +1,39 @@
+// Says which device an address belongs to (the memory map in
+// docs/crumb.md). At most one output is 1; an address that's in none of
+// them is unused, so it reads 0 and writes go nowhere.
+//
+//   rom     0x0000-0x1FFF   the program
+//   ram     0x2000-0x3FFF   8K words
+//   screen  0x4000-0x41FF   512 words
+//   io      0x6000-0x6007   the ports (Ports reads the 8th, 0x6007, as 0)
+chip AddressDecoder {
+  in  addr[16]
+  out rom, ram, screen, io
+  match16_1 = Match16(addr, 0xE000, 0)
+  match16_2 = Match16(addr, 0xE000, 0x2000)
+  match16_3 = Match16(addr, 0xFE00, 0x4000)
+  match16_4 = Match16(addr, 0xFFF8, 0x6000)
+  rom = match16_1
+  ram = match16_2
+  screen = match16_3
+  io = match16_4
+}
+
+test AddressDecoder {
+  // addr   | rom ram screen io
+     0x0000 | 1   0   0      0
+     0x1FFF | 1   0   0      0
+     0x2000 | 0   1   0      0
+     0x3FFF | 0   1   0      0
+     0x4000 | 0   0   1      0
+     0x41FF | 0   0   1      0
+     0x4200 | 0   0   0      0   // past the screen: nothing's there
+     0x5FFF | 0   0   0      0
+     0x6000 | 0   0   0      1   // the gamepad
+     0x6006 | 0   0   0      1   // the console
+     0x6007 | 0   0   0      1
+     0x6008 | 0   0   0      0
+     0x7FFF | 0   0   0      0
+     0x8000 | 0   0   0      0
+     0xFFFF | 0   0   0      0
+}

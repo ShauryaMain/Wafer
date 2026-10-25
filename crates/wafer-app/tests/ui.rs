@@ -1743,7 +1743,99 @@ fn builds_crumb() {
     // And it runs a real program exactly like the reference.
     let hello = std::fs::read_to_string(dir.join("hello.asm")).unwrap();
     let program = crumb::assemble(&hello).unwrap();
-    let run = wafer_core::lockstep::lockstep(&ws.design, "Crumb", &program.words, 10_000, 16384)
+    let run = wafer_core::lockstep::lockstep(&ws.design, "Crumb", &program.words, 10_000, crumb::isa::TICKS_PER_FRAME)
         .unwrap_or_else(|e| panic!("{e}"));
     assert!(run.halted && run.instructions == 164, "{run:?}");
+}
+
+/// Builds Match16 and then AddressDecoder on the canvas the way the guide
+/// in the chat says to.
+#[test]
+fn builds_match16_and_address_decoder() {
+    let dir = example_project("address_decoder");
+    reset_chip(&dir, "Match16", "  in  a[16], mask[16], value[16]\n  out eq\n");
+    reset_chip(&dir, "AddressDecoder", "  in  addr[16]\n  out rom, ram, screen, io\n");
+    let mut h = open_sized(&dir, egui::vec2(2000.0, 1400.0));
+    let frame = |h: &mut Harness<'static, WaferApp>| {
+        let c = h.state().state.canvas.rect().center();
+        h.hover_at(c);
+        h.run_steps(1);
+        h.key_press(Key::F);
+        h.run_steps(3);
+    };
+
+    // Part 1: Match16.
+    h.state_mut().state.open_chip("Match16");
+    h.run_steps(3);
+    let c = h.state().state.canvas.rect().center();
+    for (part, at) in [
+        ("And", vec2(-300.0, -100.0)),
+        ("Xor", vec2(-150.0, -100.0)),
+        ("Or", vec2(0.0, -200.0)),
+        ("Or", vec2(150.0, -200.0)),
+        ("Or", vec2(0.0, 50.0)),
+        ("Or", vec2(150.0, 50.0)),
+        ("Not", vec2(300.0, -50.0)),
+    ] {
+        add(&mut h, c + at, part);
+    }
+    frame(&mut h);
+    connect(&mut h, ("in:a", 0), ("and1", 0), None);
+    connect(&mut h, ("in:mask", 0), ("and1", 1), None);
+    connect(&mut h, ("and1", 0), ("xor1", 0), None);
+    connect(&mut h, ("in:value", 0), ("xor1", 1), None);
+    for (from, to, top, bottom) in [
+        ("xor1", "or1", "xor1[15:8]", "xor1[7:0]"),
+        ("or1", "or2", "or1[7:4]", "or1[3:0]"),
+        ("or2", "or3", "or2[3:2]", "or2[1:0]"),
+        ("or3", "or4", "or3[1]", "or3[0]"),
+    ] {
+        option_connect(&mut h, (from, 0), (to, 0), top);
+        option_connect(&mut h, (from, 0), (to, 1), bottom);
+    }
+    connect(&mut h, ("or4", 0), ("not1", 0), None);
+    connect(&mut h, ("not1", 0), ("out:eq", 0), None);
+    let text = chip_text(&dir, "Match16.chip");
+    for line in ["and1 = And(a, mask)", "xor1 = Xor(and1, value)", "or1 = Or(xor1[15:8], xor1[7:0])", "eq = not1"] {
+        assert!(text.contains(line), "missing `{line}`:\n{text}");
+    }
+    assert!(wafer_app::simrun::TestResults::run(&h.state().state.ws, "Match16").passed(), "Match16 fails:\n{text}");
+
+    // Part 2: AddressDecoder, four Match16s with numbers typed in.
+    h.state_mut().state.open_chip("AddressDecoder");
+    h.run_steps(3);
+    let c = h.state().state.canvas.rect().center();
+    for y in [-240.0, -80.0, 80.0, 240.0] {
+        add(&mut h, c + vec2(0.0, y), "Match16");
+    }
+    frame(&mut h);
+    let devices = [
+        ("match16_1", "0xE000", None, "out:rom"),
+        ("match16_2", "0xE000", Some("0x2000"), "out:ram"),
+        ("match16_3", "0xFE00", Some("0x4000"), "out:screen"),
+        ("match16_4", "0xFFF8", Some("0x6000"), "out:io"),
+    ];
+    for (matcher, mask, value, out) in devices {
+        connect(&mut h, ("in:addr", 0), (matcher, 0), None);
+        pin_number(&mut h, (matcher, 1), mask);
+        match value {
+            Some(value) => pin_number(&mut h, (matcher, 2), value),
+            None => pin_menu(&mut h, (matcher, 2), "Set to 0"),
+        }
+        connect(&mut h, (matcher, 0), (out, 0), None);
+    }
+    shot(&mut h, "address_decoder");
+    let text = chip_text(&dir, "AddressDecoder.chip");
+    for line in [
+        "match16_1 = Match16(addr, 0xE000, 0)",
+        "match16_2 = Match16(addr, 0xE000, 0x2000)",
+        "match16_3 = Match16(addr, 0xFE00, 0x4000)",
+        "match16_4 = Match16(addr, 0xFFF8, 0x6000)",
+        "rom = match16_1",
+        "io = match16_4",
+    ] {
+        assert!(text.contains(line), "missing `{line}`:\n{text}");
+    }
+    let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "AddressDecoder");
+    assert!(results.passed(), "AddressDecoder's tests fail:\n{text}");
 }

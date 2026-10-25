@@ -26,8 +26,9 @@ pub const BUTTONS: [(&str, u16); 8] =
 
 pub const STACK_DEPTH: usize = 32;
 pub const TICKS_PER_INSTRUCTION: u64 = 2;
-/// Provisional: set for real once the gate-level CPU has been measured.
-pub const TICKS_PER_FRAME: u64 = 16384;
+/// 2048 instructions per frame. Chosen after measuring the gate-level Crumb
+/// at about 100,000 ticks a second, so games are watchable even in gates.
+pub const TICKS_PER_FRAME: u64 = 4096;
 
 /// `PC` and jump targets are 13 bits: the whole ROM.
 pub const ADDRESS_MASK: u16 = 0x1FFF;

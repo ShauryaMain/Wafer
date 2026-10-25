@@ -103,6 +103,15 @@ var paddle_y
 | Checking | `wafer run prog.asm --gates` runs the program on the gate-level Console and the reference Crumb side by side, and stops at the first instruction where they differ |
 | Chips on buses | (Decided after Add16.) **Any chip whose inputs and outputs are all 1 bit works on buses bit by bit**, the way built-in gates do: `Xor(a, b)` on 16-bit buses is 16 of our Xors side by side. 1-bit inputs feed every copy, and the bus inputs must all be the same width. On the canvas it's one box labelled `Xor ×16`, and inside it's the same circuit with 16-bit wires. HalfAdder and FullAdder work this way too: on buses they're 16 separate adders with no carry between them |
 
+### Phase 3, round 5: the Console (2026-10-25)
+
+| Topic | Decision |
+|---|---|
+| Frame length | **4096 ticks**: 2048 instructions per frame. Chosen after measuring the gate-level Crumb at about 100,000 ticks a second, so games run at roughly 20 frames a second even in gates, before turbo mode. (Was 16384, provisional) |
+| Unused addresses | Full decoding, as the spec says: only the exact addresses in the memory map answer; everything else reads 0 and ignores writes |
+| Program | The Console's Rom holds `count.asm` by default (milestone 3b's finish line); the cartridge menu (3c) swaps it |
+| Structure | Four sub-chips first, each with its own tests: `AddressDecoder` (which device an address means), `Ports` (the LEDs and number registers, console characters, and the port Crumb reads), `FrameCounter` (counts ticks; its top bits are `FRAME`) and `Random` (the LFSR). Then `Console` wires them to Crumb, the Rom, the RAM and the screen |
+
 ## Core principles
 
 1. **Instant feedback.** Everything is live: flip an input and watch the signal ripple through.
@@ -347,7 +356,9 @@ The spec is [docs/crumb.md](docs/crumb.md): memory map, instruction encoding, th
     9. `Stack` (decided 2026-10-25): one stack, used twice. A StackPointer, a 32-word `Ram`, and two flip-flops that catch what to push and whether at the end of the execute tick, so the Ram writes it during the next fetch tick. In: `data`, `write`, `delta`, `execute`, `reset`; out: `top`. Six boxes: StackPointer, a Dff for the word, a Mux (reset clears `write`) and a Dff for whether, a Mux that blocks the write during execute, and the Ram. ✅ Built by the user on 2026-10-25; all 9 tests pass.
     10. `Sequencer` (decided 2026-10-25): the phase flip-flop (fetch and execute take turns), the PC in a Register16, PC+1 from Inc13, and the next PC: a return goes to R, a jump or call to `addr`, `jz` to `addr` if T is 0 (checked with `Compare16(t, 0)`), and anything else to PC+1. Ten boxes. ✅ Built by the user on 2026-10-25; all 13 tests pass. (Its phase loop, `Not` → `Mux` → `Dff` → `Not`, has no width of its own, so the checker now settles a spread chip nothing decides at 1 bit and works the rest out from there.)
     11. `Crumb`: wires the instruction register (a Register16 loading in fetch), Decode, ALU16, the T register (a Register16 loading in execute, from the ALU or a literal's value), the Sequencer and two Stacks. The data stack pushes T when `t_to_n`; the return stack pushes T when `t_to_r`, or PC+1 on a call. The bus puts out the PC in fetch and T in execute, with N as the data to write and `store` as the write in execute. Ports: `reset` and `mem_in` in; `addr`, `mem_out`, `write`, and (to watch from outside) `execute`, `pc`, `t`, `r` out. ✅ Built by the user on 2026-10-25. Its first version passed its own tests, but the lockstep harness caught two wiring slips (the bus showed T while fetching, and ALU16 read R from the N stack); the tests now check both (21 checks). It runs hello.asm, count.asm and bounce.asm exactly like the reference: `wafer run prog.asm --gates -p chips` shows what the program did on the gates.
-    12. `Console`: address decoding, RAM, screen, I/O ports, the frame counter and the random-number LFSR.
+    12. `AddressDecoder`, `Ports`, `FrameCounter` and `Random`: the Console's sub-chips (round 5).
+        - `AddressDecoder` (planned 2026-10-25): four `Match16`s, one per device. `Match16(a, mask, value)` is 1 when the bits of `a` that `mask` picks equal `value`: an And, an Xor, Compare16's tree of Ors, then a Not. The masks and values: ROM `0xE000`/`0`, RAM `0xE000`/`0x2000`, screen `0xFE00`/`0x4000`, I/O `0xFFF8`/`0x6000` (Ports reads the eighth port, 0x6007, as 0). Tests: Match16 10, AddressDecoder 15, and `address_decoder_vs_spec` checks all 65,536 addresses against the memory map. ✅ Built by the user on 2026-10-25, Match16 and AddressDecoder both: all 25 tests pass, and the decoder agrees with the memory map on every address.
+    13. `Console`: Crumb, the program Rom (`count.asm`), 8K of RAM, the 512-word screen, and the four sub-chips. Its outputs show the LEDs, the number display and console characters, plus Crumb's `pc`, `t` and `execute` for checking it against the reference.
   - **Also Claude:** a lockstep harness that runs the gate-level Crumb next to the reference Crumb with memory simulated in Rust, comparing after every instruction (so Crumb is checked before the Console exists); then the `--gates` checker on the Console, and the speed measurement at the end.
     - ✅ Done 2026-10-25: `wafer_core::lockstep` and `wafer run prog.asm --gates -p chips`. It compares PC and T after each instruction, N and R once the next fetch has landed the push, the number display, LEDs and console, and at the end all of RAM and the screen. A throwaway Crumb built to the plan matched the reference on hello.asm, count.asm, bounce.asm and nine instruction workouts.
     - **Speed, first measurement (2026-10-25):** the gate-level Crumb (our Nand-built gates throughout) runs about 5,000 instructions/s in a debug build and 40,000–60,000 instructions/s (80,000–120,000 ticks/s) in a release build (`cargo wafer` now builds in release). At 16,384 ticks per frame that's about 5 frames a second, so real-time games need turbo mode (3d) or fewer ticks per frame.
@@ -357,7 +368,7 @@ The spec is [docs/crumb.md](docs/crumb.md): memory map, instruction encoding, th
 
 #### Still open
 
-- Speed: the simulator works bit by bit, and Crumb will be a few thousand gates. Measure once 3b exists, then decide how turbo works and how many ticks make a frame (16384 for now).
+- Speed: measured (about 100,000 ticks a second for Crumb in gates, release build) and the frame length set from it (round 5). How turbo works is still open, for 3d.
 
 ### Phase 4: Silicon
 

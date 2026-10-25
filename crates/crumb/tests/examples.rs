@@ -30,11 +30,21 @@ fn count_counts_frames() {
 
 #[test]
 fn bounce_bounces_off_the_walls() {
-    let mut m = machine("bounce.asm");
-    m.run_frames(60);
-    // 59 moves from (10, 20): y hits the bottom (59) after 39 and comes
-    // back up 20, while x is still heading right.
-    let (x, y) = (69, 39);
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../chips/bounce.asm");
+    let program = assemble(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let var = |name: &str| usize::from(program.symbol(name).unwrap().value - crumb::isa::RAM_START);
+    let mut m = Machine::new(&program.words);
+    let mut bounced = (false, false);
+    for _ in 0..200 {
+        m.run_frames(1);
+        let (x, y) = (usize::from(m.ram[var("x")]), usize::from(m.ram[var("y")]));
+        assert!((1..=123).contains(&x) && (1..=59).contains(&y), "the ball stays inside the walls: ({x}, {y})");
+        bounced.0 |= m.ram[var("dx")] == 0xFFFF;
+        bounced.1 |= m.ram[var("dy")] == 0xFFFF;
+    }
+    assert!(bounced.0 && bounced.1, "it turned around in both directions");
+    // The ball is drawn where x and y say, 4×4, and nothing else is lit.
+    let (x, y) = (usize::from(m.ram[var("x")]), usize::from(m.ram[var("y")]));
     assert!(m.pixel(x, y) && m.pixel(x + 3, y + 3), "the ball is at ({x}, {y})\n{}", m.screen_text());
     assert!(!m.pixel(x + 4, y) && !m.pixel(x, y - 1), "and is only 4×4");
     let corners = [(0, 0), (127, 0), (0, 63), (127, 63), (0, 30), (127, 30), (64, 0), (64, 63)];

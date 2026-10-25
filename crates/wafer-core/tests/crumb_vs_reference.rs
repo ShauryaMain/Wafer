@@ -62,7 +62,7 @@ fn instructions_match_the_reference() {
         ("stack wraps", &stack_wraps),
     ];
     for (name, source) in programs {
-        matches(&design, name, source, 10_000, 16384);
+        matches(&design, name, source, 10_000, crumb::isa::TICKS_PER_FRAME);
     }
 }
 
@@ -70,7 +70,7 @@ fn instructions_match_the_reference() {
 fn example_programs_match_the_reference() {
     let design = design();
     let read = |file: &str| std::fs::read_to_string(chips_dir().join(file)).expect("the program is readable");
-    matches(&design, "hello.asm", &read("hello.asm"), 10_000, 16384);
+    matches(&design, "hello.asm", &read("hello.asm"), 10_000, crumb::isa::TICKS_PER_FRAME);
     // Short frames, so the frame waits don't take long.
     matches(&design, "count.asm", &read("count.asm"), 600, 64);
     matches(&design, "bounce.asm", &read("bounce.asm"), 1500, 256);
