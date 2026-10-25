@@ -269,3 +269,23 @@ fn errors_point_at_the_mistake() {
     let e = error(source);
     assert_eq!(&source[e.start..e.end], "frobnicate");
 }
+
+#[test]
+fn reset_restarts_crumb_but_keeps_memory() {
+    // Like the gate-level Console: reset restarts the CPU, the ports, the
+    // frame counter and the random numbers, but RAM, the screen and the
+    // stacks keep their words.
+    let mut m = run("var x\n: main 1 2 3 42 x ! 0xFFFF SCREEN ! 7 LEDS ! 9 NUMBER ! 72 CONSOLE ! 5 >r halt ;");
+    let x = usize::from(assemble("var x\n: main ;").unwrap().symbol("x").unwrap().value - isa::RAM_START);
+    m.reset();
+    assert_eq!((m.pc, m.t, m.dsp, m.rsp), (0, 0, 0, 0));
+    assert_eq!((m.leds, m.number, m.ticks, m.random()), (0, 0, 0, crumb::cpu::RANDOM_SEED));
+    assert!(m.console.is_empty() && !m.halted);
+    assert_eq!(m.ram[x], 42, "RAM keeps its words");
+    assert_eq!(m.screen[0], 0xFFFF, "and so does the screen");
+    assert_eq!(m.dstack[2..=3], [1, 2], "and the data stack (under where T was)");
+    assert_eq!(m.rstack[1], 5, "and the return stack");
+    // A new console starts with everything at 0.
+    let fresh = Machine::new(&[]);
+    assert!(fresh.ram.iter().chain(&fresh.screen).all(|&w| w == 0));
+}

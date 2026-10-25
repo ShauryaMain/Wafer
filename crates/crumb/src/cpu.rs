@@ -52,8 +52,8 @@ impl Machine {
             dstack: [0; STACK_DEPTH],
             rstack: [0; STACK_DEPTH],
             rom,
-            ram: Vec::new(),
-            screen: Vec::new(),
+            ram: vec![0; RAM_WORDS],
+            screen: vec![0; SCREEN_WORDS],
             pad: 0,
             switches: 0,
             leds: 0,
@@ -70,15 +70,13 @@ impl Machine {
     }
 
     /// Back to the reset state, keeping the ROM, the buttons and switches.
+    /// Memory keeps its words too, like real RAM: the stacks, RAM and the
+    /// screen are only all zeros in a new machine (at power-on).
     pub fn reset(&mut self) {
         self.pc = 0;
         self.t = 0;
         self.dsp = 0;
         self.rsp = 0;
-        self.dstack = [0; STACK_DEPTH];
-        self.rstack = [0; STACK_DEPTH];
-        self.ram = vec![0; RAM_WORDS];
-        self.screen = vec![0; SCREEN_WORDS];
         self.leds = 0;
         self.number = 0;
         self.console.clear();

@@ -73,6 +73,11 @@ pub enum Edit {
         old: String,
         new: String,
     },
+    /// Sets the program a Rom holds: `file: "count.asm"`.
+    SetProgram {
+        name: String,
+        file: String,
+    },
 }
 
 /// The new text for the file that holds the chip.
@@ -107,6 +112,7 @@ pub fn apply(project: &Project, design: &Design, chip: &str, edit: &Edit) -> Res
         Edit::AddPort { dir, name, width } => editor.add_port(*dir, name, *width)?,
         Edit::RemovePort { dir, name } => editor.remove_port(*dir, name)?,
         Edit::Rename { old, new } => editor.rename(old, new)?,
+        Edit::SetProgram { name, file } => editor.set_program(name, file)?,
     }
     let renamed = editor.renamed.clone();
     Ok(EditResult { file, text: editor.finish()?, renamed })
@@ -429,6 +435,19 @@ impl<'a> Editor<'a> {
     /// naturally.
     fn rewrite_call(&mut self, name: &str, ports: &[String], args: &[Option<String>]) {
         let Some((_, call)) = self.call_stmt(name) else { return };
+        // Text settings like a Rom's `file: "pong.asm"` aren't wires; keep them.
+        let settings = (call.args.iter().filter(|a| matches!(a.value.kind, ExprKind::Str(_))))
+            .map(|arg| {
+                let start = arg.name.as_ref().map_or(arg.value.span.start, |n| n.span.start);
+                self.text[start..arg.value.span.end].to_string()
+            })
+            .collect();
+        self.rewrite_call_with(name, ports, args, settings);
+    }
+
+    /// Rewrites a call with its wires and then `settings`, as written.
+    fn rewrite_call_with(&mut self, name: &str, ports: &[String], args: &[Option<String>], settings: Vec<String>) {
+        let Some((_, call)) = self.call_stmt(name) else { return };
         let leading = args.iter().take_while(|a| a.is_some()).count();
         let mut parts = Vec::new();
         for (i, (port, arg)) in ports.iter().zip(args).enumerate() {
@@ -436,13 +455,20 @@ impl<'a> Editor<'a> {
                 parts.push(if i < leading { arg.clone() } else { format!("{port}: {arg}") });
             }
         }
-        // Text settings like a Rom's `file: "pong.asm"` aren't wires; keep them.
-        for arg in call.args.iter().filter(|a| matches!(a.value.kind, ExprKind::Str(_))) {
-            let start = arg.name.as_ref().map_or(arg.value.span.start, |n| n.span.start);
-            parts.push(self.text[start..arg.value.span.end].to_string());
-        }
+        parts.extend(settings);
         let new = format!("{}({})", call.chip.name, parts.join(", "));
         self.changes.push((call.span.start, call.span.end, new));
+    }
+
+    fn set_program(&mut self, name: &str, file: &str) -> Result<(), String> {
+        let inst = self.info.instances.iter().find(|i| i.name == name);
+        let inst = inst.ok_or_else(|| format!("there's no box named `{name}`"))?;
+        if !matches!(inst.callee, crate::check::Callee::Gate { kind: crate::gate::GateKind::Rom, .. }) {
+            return Err(format!("`{name}` isn't a Rom, so it can't hold a program"));
+        }
+        let (ports, args) = self.call_args(name)?;
+        self.rewrite_call_with(name, &ports, &args, vec![format!("file: {file:?}")]);
+        Ok(())
     }
 
     /// The byte range of a statement's whole line, if it's alone on it
@@ -1136,6 +1162,21 @@ mod tests {
         assert!(new.contains("h1_sum   = h1.sum"), "{new}");
         assert!(parent.contains("h2   = HalfAdder(front1.h1_sum, cin)"), "{parent}");
         assert!(parent.contains("Or(front1.h1_carry, h2.carry)"), "{parent}");
+    }
+
+    #[test]
+    fn sets_a_roms_program() {
+        let fresh = "chip H {\n  in  a[4]\n  out y[16]\n\n  rom1 = Rom(a)\n  y = rom1\n}\n";
+        let set = |file: &str| Edit::SetProgram { name: "rom1".into(), file: file.into() };
+        let out = run(fresh, set("count.asm")).unwrap();
+        assert!(out.contains("rom1 = Rom(a, file: \"count.asm\")"), "{out}");
+        // Choosing another replaces it.
+        let out = run(&out, set("hello.asm")).unwrap();
+        assert!(out.contains("rom1 = Rom(a, file: \"hello.asm\")") && !out.contains("count.asm"), "{out}");
+        // Before anything is wired in, too.
+        let empty = "chip H {\n  in  a[4]\n  out y[16]\n\n  rom1 = Rom()\n}\n";
+        assert!(run(empty, set("p.hex")).unwrap().contains("rom1 = Rom(file: \"p.hex\")"));
+        assert!(run(HALF, Edit::SetProgram { name: "sum".into(), file: "p.hex".into() }).is_err(), "not a Rom");
     }
 
     #[test]

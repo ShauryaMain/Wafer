@@ -21,7 +21,7 @@ If they disagree, this page decides who's right (or we fix this page).
 
 - **Words, not bytes.** Every address holds one 16-bit word.
 - **Stacks wrap around.** Pushing a 33rd value overwrites the oldest. Nothing checks for overflow.
-- **Reset:** `PC`, `T`, `dsp` and `rsp` are 0, and both stacks are full of zeros. Execution starts at address 0.
+- **Reset:** `PC`, `T`, `dsp` and `rsp` are 0, and execution starts at address 0. Memory keeps its words, like real RAM: both stacks, RAM and the screen are full of zeros only at power-on (a new console, or a new cartridge).
 
 ## Memory map
 
@@ -41,7 +41,7 @@ The top three address bits pick the device.
 | `0x6006` | `CONSOLE` | 0 | The low 8 bits are printed as a character (10 is a new line) |
 | anything else | nothing | 0 | Ignored |
 
-RAM and the screen start cleared to 0.
+RAM and the screen are all zeros at power-on. Reset leaves them as they were; it restarts Crumb, clears the LEDs and number display, and starts the frame counter and random numbers again.
 
 ### Screen
 

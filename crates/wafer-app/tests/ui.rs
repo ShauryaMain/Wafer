@@ -2070,3 +2070,182 @@ fn builds_random() {
     let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "Random");
     assert!(results.passed(), "Random's tests fail:\n{text}");
 }
+
+/// Option-drags `from` into a memory's address pin and takes bits `hi..0`,
+/// the way you'd type the numbers into the picker's "take" fields.
+fn address_bits(h: &mut Harness<'static, WaferApp>, from: (&str, usize), memory: &str, hi: usize) {
+    let (a, b) = (pin(h, from.0, true, from.1), pin(h, memory, false, 0));
+    h.event(Event::ModifiersChanged(Modifiers::ALT));
+    drag(h, a, b);
+    h.event(Event::ModifiersChanged(Modifiers::NONE));
+    h.run_steps(1);
+    assert!(h.state().state.canvas.bit_picker_open(), "Option-drop asks which bits");
+    h.state_mut().state.canvas.choose_bits(hi, 0, 0);
+    h.run_steps(1);
+    h.get_by_label("Connect").click();
+    h.run_steps(3);
+}
+
+/// Builds the Console on the canvas the way the guide in the chat says to.
+#[test]
+fn builds_console() {
+    let dir = example_project("console");
+    let ports =
+        "  in  reset, pad[8], switches[16]\n  out leds[16], number[16], char[8], print, pc[13], t[16], execute\n";
+    reset_chip(&dir, "Console", ports);
+    let mut h = open_sized(&dir, egui::vec2(2600.0, 1900.0));
+    h.state_mut().state.open_chip("Console");
+    h.run_steps(3);
+
+    // Step 1: the parts, then dragged into columns.
+    let c = h.state().state.canvas.rect().center();
+    let parts = [
+        "Crumb",
+        "AddressDecoder",
+        "Rom",
+        "And",
+        "Ram",
+        "And",
+        "Ram",
+        "Ports",
+        "FrameCounter",
+        "Random",
+        "Mux",
+        "Mux",
+        "Mux",
+    ];
+    for (i, part) in parts.into_iter().enumerate() {
+        let (col, row) = ((i % 5) as f32, (i / 5) as f32);
+        add(&mut h, c + vec2(-500.0 + col * 220.0, -300.0 + row * 250.0), part);
+    }
+    let grid = [
+        ("in:reset", (0.0, 0.0)),
+        ("in:pad", (0.0, 700.0)),
+        ("in:switches", (0.0, 800.0)),
+        ("crumb1", (250.0, 150.0)),
+        ("framecounter1", (250.0, 650.0)),
+        ("random1", (250.0, 800.0)),
+        ("addressdecoder1", (560.0, 0.0)),
+        ("and1", (560.0, 220.0)),
+        ("and2", (560.0, 360.0)),
+        ("rom1", (560.0, 520.0)),
+        ("ram1", (840.0, 200.0)),
+        ("ram2", (840.0, 380.0)),
+        ("ports1", (840.0, 560.0)),
+        ("mux1", (1120.0, 300.0)),
+        ("mux2", (1120.0, 450.0)),
+        ("mux3", (1120.0, 600.0)),
+        ("out:leds", (1400.0, 0.0)),
+        ("out:number", (1400.0, 120.0)),
+        ("out:char", (1400.0, 240.0)),
+        ("out:print", (1400.0, 360.0)),
+        ("out:pc", (1400.0, 480.0)),
+        ("out:t", (1400.0, 600.0)),
+        ("out:execute", (1400.0, 720.0)),
+    ];
+    let positions = grid.iter().map(|(k, at)| (k.to_string(), *at)).collect();
+    h.state_mut().state.ws.move_nodes("Console", positions);
+    h.run_steps(2);
+    h.hover_at(c);
+    h.run_steps(1);
+    h.key_press(Key::F);
+    h.run_steps(3);
+
+    let (addr, mem_out, write) = (("crumb1", 0), ("crumb1", 1), ("crumb1", 2));
+    let decoder = |out: usize| ("addressdecoder1", out);
+    let (rom, ram, screen, io) = (decoder(0), decoder(1), decoder(2), decoder(3));
+    // Step 2: Crumb and AddressDecoder.
+    connect(&mut h, ("in:reset", 0), ("crumb1", 0), None);
+    connect(&mut h, addr, ("addressdecoder1", 0), None);
+    // Step 3: the Rom holds count.asm, chosen in the Inspector, and reads
+    // the low 13 bits of the address.
+    let at = node_center(&mut h, "rom1");
+    click(&mut h, at);
+    h.get(by().role(egui::accesskit::Role::ComboBox)).click();
+    h.run_steps(2);
+    h.get_by_label("count.asm").click();
+    h.run_steps(3);
+    address_bits(&mut h, addr, "rom1", 12);
+    // Step 4: a store reaches RAM or the screen only when it's theirs.
+    connect(&mut h, write, ("and1", 0), None);
+    connect(&mut h, ram, ("and1", 1), None);
+    connect(&mut h, write, ("and2", 0), None);
+    connect(&mut h, screen, ("and2", 1), None);
+    address_bits(&mut h, addr, "ram1", 12);
+    connect(&mut h, mem_out, ("ram1", 1), None);
+    connect(&mut h, ("and1", 0), ("ram1", 2), None);
+    address_bits(&mut h, addr, "ram2", 8);
+    connect(&mut h, mem_out, ("ram2", 1), None);
+    connect(&mut h, ("and2", 0), ("ram2", 2), None);
+    // Step 5: the ports, with the frame counter and random numbers.
+    connect(&mut h, ("in:reset", 0), ("framecounter1", 0), None);
+    connect(&mut h, ("in:reset", 0), ("random1", 0), None);
+    for (from, pin) in [
+        (addr, 0),
+        (io, 1),
+        (write, 2),
+        (mem_out, 3),
+        (("in:reset", 0), 4),
+        (("in:pad", 0), 5),
+        (("framecounter1", 0), 6),
+        (("random1", 0), 7),
+        (("in:switches", 0), 8),
+    ] {
+        connect(&mut h, from, ("ports1", pin), None);
+    }
+    // Step 6: what Crumb reads.
+    for (mux, first, device, select) in [
+        ("mux1", ("ports1", 0), ("ram2", 0), screen),
+        ("mux2", ("mux1", 0), ("ram1", 0), ram),
+        ("mux3", ("mux2", 0), ("rom1", 0), rom),
+    ] {
+        connect(&mut h, first, (mux, 0), None);
+        connect(&mut h, device, (mux, 1), None);
+        connect(&mut h, select, (mux, 2), None);
+    }
+    connect(&mut h, ("mux3", 0), ("crumb1", 1), None);
+    // Step 7: the outputs.
+    for (from, to) in [
+        (("ports1", 1), "out:leds"),
+        (("ports1", 2), "out:number"),
+        (("ports1", 3), "out:char"),
+        (("ports1", 4), "out:print"),
+        (("crumb1", 4), "out:pc"),
+        (("crumb1", 5), "out:t"),
+        (("crumb1", 3), "out:execute"),
+    ] {
+        connect(&mut h, from, (to, 0), None);
+    }
+    shot(&mut h, "console");
+
+    let text = chip_text(&dir, "Console.chip");
+    for line in [
+        "crumb1 = Crumb(reset, mux3)",
+        "addressdecoder1 = AddressDecoder(crumb1.addr)",
+        "rom1 = Rom(crumb1.addr[12:0], file: \"count.asm\")",
+        "and1 = And(crumb1.write, addressdecoder1.ram)",
+        "ram1 = Ram(crumb1.addr[12:0], crumb1.mem_out, and1)",
+        "and2 = And(crumb1.write, addressdecoder1.screen)",
+        "ram2 = Ram(crumb1.addr[8:0], crumb1.mem_out, and2)",
+        "ports1 = Ports(crumb1.addr, addressdecoder1.io, crumb1.write, crumb1.mem_out, reset, pad, framecounter1, random1, switches)",
+        "framecounter1 = FrameCounter(reset)",
+        "random1 = Random(reset)",
+        "mux1 = Mux(ports1.out, ram2, addressdecoder1.screen)",
+        "mux2 = Mux(mux1, ram1, addressdecoder1.ram)",
+        "mux3 = Mux(mux2, rom1, addressdecoder1.rom)",
+        "leds = ports1.leds",
+        "execute = crumb1.execute",
+    ] {
+        assert!(text.contains(line), "missing `{line}`:\n{text}");
+    }
+    let results = wafer_app::simrun::TestResults::run(&h.state().state.ws, "Console");
+    assert!(results.passed(), "the Console's tests fail:\n{text}");
+    // And a program that uses every device, in lockstep with the reference.
+    let program = crumb::assemble(
+        "var x\n: main 42 x ! x @ NUMBER ! 0x8001 SCREEN 511 + ! SCREEN 511 + @ LEDS ! 72 CONSOLE ! halt ;",
+    )
+    .unwrap();
+    let run = wafer_core::lockstep::lockstep(&h.state().state.ws.design, "Console", &program.words, 1000, 0);
+    let run = run.unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!((run.board.number, run.board.leds, run.board.console_text().as_str()), (42, 0x8001, "H"));
+}

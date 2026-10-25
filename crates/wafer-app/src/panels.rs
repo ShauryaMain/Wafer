@@ -212,6 +212,9 @@ fn node_inspector(ui: &mut egui::Ui, state: &mut AppState, s: &wafer_core::schem
         }
     });
 
+    if let NodeKind::Gate { name, kind: wafer_core::GateKind::Rom, .. } = &node.kind {
+        program_picker(ui, state, name);
+    }
     if let NodeKind::Gate { name, kind: wafer_core::GateKind::Ram | wafer_core::GateKind::Rom, .. } = &node.kind {
         ui.add_space(6.0);
         memory_view(ui, state, name);
@@ -303,6 +306,36 @@ fn memory_view(ui: &mut egui::Ui, state: &AppState, name: &str) {
             });
         }
     });
+}
+
+/// Which program a Rom holds: any `.asm` or `.hex` file in the project.
+fn program_picker(ui: &mut egui::Ui, state: &mut AppState, name: &str) {
+    let chip = state.canvas.chip.clone();
+    let current = (state.ws.design.chips.get(&chip))
+        .and_then(|c| c.instances.iter().find(|i| i.name == name))
+        .and_then(|i| i.program.as_ref())
+        .map(|p| p.name.clone());
+    let mut chosen = None;
+    ui.horizontal(|ui| {
+        ui.label("Program");
+        egui::ComboBox::from_id_salt("rom_program")
+            .selected_text(mono(current.as_deref().unwrap_or("choose one")))
+            .show_ui(ui, |ui| {
+                let mut files: Vec<String> = (std::fs::read_dir(&state.ws.dir).into_iter().flatten().flatten())
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .filter(|file| wafer_core::program::is_program(std::path::Path::new(file)))
+                    .collect();
+                files.sort();
+                for file in files {
+                    if ui.selectable_label(current.as_ref() == Some(&file), mono(&file)).clicked() {
+                        chosen = Some(file);
+                    }
+                }
+            });
+    });
+    if let Some(file) = chosen.filter(|file| current.as_ref() != Some(file)) {
+        state.ws.edit(&chip, &[Edit::SetProgram { name: name.to_string(), file }], &[]);
+    }
 }
 
 /// A Rom's program, one word per line, disassembled when it came from a

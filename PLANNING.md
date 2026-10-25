@@ -112,6 +112,15 @@ var paddle_y
 | Program | The Console's Rom holds `count.asm` by default (milestone 3b's finish line); the cartridge menu (3c) swaps it |
 | Structure | Four sub-chips first, each with its own tests: `AddressDecoder` (which device an address means), `Ports` (the LEDs and number registers, console characters, and the port Crumb reads), `FrameCounter` (counts ticks; its top bits are `FRAME`) and `Random` (the LFSR). Then `Console` wires them to Crumb, the Rom, the RAM and the screen |
 
+### Phase 3, round 6: building the Console (2026-10-25)
+
+| Topic | Decision |
+|---|---|
+| Structure | **One `Console` chip**, thirteen boxes, tested as a whole (no Memory sub-chip): Crumb, AddressDecoder, the Rom (`count.asm`), an 8K Ram, the 512-word screen Ram, two Ands (a store reaches RAM or the screen only when the decoder says so), three Muxes (what Crumb reads), Ports, FrameCounter and Random |
+| Screen | **Read straight from its Ram.** The screen is a plain Ram in the Console; the app's screen panel (3c) and the checker read its words out of the simulation, like a debugger looking at memory. No video port |
+| Reset | **Memory keeps its words**, like real RAM. Reset restarts Crumb, clears the LEDs and number display, and restarts the frame counter and random numbers; the stacks, RAM and the screen are all zeros only at power-on. The spec and the reference Crumb changed to match (the gate-level Stack already worked this way) |
+| Checking | **Lockstep on any program.** The checker loads a program into the gate Console's Rom in place of `count.asm` and runs it next to the reference Crumb, comparing PC, T, N and R every instruction, the ports along the way, and RAM and the screen at the end. `wafer run prog.asm --gates` then runs the whole computer in gates |
+
 ## Core principles
 
 1. **Instant feedback.** Everything is live: flip an input and watch the signal ripple through.
@@ -336,7 +345,7 @@ The spec is [docs/crumb.md](docs/crumb.md): memory map, instruction encoding, th
     - **A Rom's words are always 16 bits**, Crumb's word size. `.hex` files work too, for machine code that didn't come from our assembler.
     - **The assembler optimizes a little:** a return merges into the instruction before it, a call just before a return becomes a jump (a tail call), and a return nothing can reach is left out.
   - Known limits: the app can show a Rom's program, but it can't run a Crumb program yet. The screen, gamepad and cartridge menu come with the console in 3c.
-- **3b, the CPU in gates.** ALU16, stacks, program counter and control as `.chip` files, each with tests, all built from our own parts. *Done when:* `count.asm` runs on the gate-level Console, showing on the number display, in step with the reference. Then measure its speed.
+- **3b, the CPU in gates. ✅ Done 2026-10-25.** ALU16, stacks, program counter and control as `.chip` files, each with tests, all built from our own parts. *Done when:* `count.asm` runs on the gate-level Console, showing on the number display, in step with the reference. Then measure its speed.
   - **First (Claude): the canvas has to do everything the parts need.** Right now picking bits out of a bus (`a[7:0]`) or joining buses (`{hi, lo}`) only works in the Code tab, and Add16 needs both. Fix gaps like this before the user starts, and fix new ones as they turn up.
     - ✅ Done 2026-10-24: dropping a wire between pins of different widths asks which bits. A wide source gives a slice (`lo = Add8(a[7:0])`); a narrow source fills part of the pin (`sum[7:0] = lo.sum`, and once every bit is filled, `sum = {hi.sum, lo.sum}`). Deleting one wire of a joined bus leaves the others, and each piece of a join is labeled with the bits it fills (`→[15:8]`).
     - ✅ Done 2026-10-24: chips whose ports are all 1 bit work on buses (see "Chips on buses" in round 4). The copies come from the first bus wired in, a 1-bit input feeds every copy, the box reads `Xor ×16`, and inside it every signal (and every wire on the canvas) is 16 bits wide. Wiring a bus into a fresh one makes it that wide without asking which bit.
@@ -364,7 +373,29 @@ The spec is [docs/crumb.md](docs/crumb.md): memory map, instruction encoding, th
           - A gate given only numbers (`Mux(0, 0xB400, s)`) now takes the widest one's width before bitwise chips settle, so the Xor it feeds spreads to 16 copies while you're still wiring, instead of settling at 1 and hiding the `>> 1` pick.
           - The Chips panel's list now scrolls in the top half when there's an Inside tree to show, so a growing project can't push the tree out of view (one more chip had pushed it off the bottom in a UI test).
     13. `Console`: Crumb, the program Rom (`count.asm`), 8K of RAM, the 512-word screen, and the four sub-chips. Its outputs show the LEDs, the number display and console characters, plus Crumb's `pc`, `t` and `execute` for checking it against the reference.
+        - Planned 2026-10-25 (round 6). Ports: in `reset`, `pad[8]`, `switches[16]`; out `leds[16]`, `number[16]`, `char[8]`, `print`, `pc[13]`, `t[16]`, `execute`. Thirteen boxes:
+          ```
+          crumb1 = Crumb(reset, mux3)
+          addressdecoder1 = AddressDecoder(crumb1.addr)
+          rom1 = Rom(crumb1.addr[12:0], file: "count.asm")
+          and1 = And(crumb1.write, addressdecoder1.ram)
+          ram1 = Ram(crumb1.addr[12:0], crumb1.mem_out, and1)     // 8K of RAM
+          and2 = And(crumb1.write, addressdecoder1.screen)
+          ram2 = Ram(crumb1.addr[8:0], crumb1.mem_out, and2)      // the screen
+          ports1 = Ports(crumb1.addr, addressdecoder1.io, crumb1.write, crumb1.mem_out,
+                         reset, pad, framecounter1, random1, switches)
+          framecounter1 = FrameCounter(reset)
+          random1 = Random(reset)
+          mux1 = Mux(ports1.out, ram2, addressdecoder1.screen)    // Ports' word is 0 off the ports,
+          mux2 = Mux(mux1, ram1, addressdecoder1.ram)             // so unused addresses read 0
+          mux3 = Mux(mux2, rom1, addressdecoder1.rom)
+          ```
+          There's no loop through `mem_in`: the address comes from registers (PC in fetch, T in execute). The checker finds RAM and the screen by size (the 13-bit and 9-bit Rams at the Console's top level), so box names don't matter.
+        - Tests (2026-10-25): 7 checks running `count.asm`: the first fetch from the ROM, frame 1 counted on the number display and LEDs, and a reset that clears the display but keeps the count in RAM. `console_vs_reference` loads programs into its Rom and runs them in lockstep: RAM, the screen, ROM tables, every port and unused addresses, `hello.asm`, `bounce.asm`, and three frames of `count.asm`. A throwaway Console built to the plan passed all of it, at about 4,000 instructions a second in a debug build and 35,000–43,000 in release (70,000–86,000 ticks a second, about 20 frames a second).
+        - Tools for it: the Inspector has a **Program** picker for a Rom box (any `.asm` or `.hex` in the project; the `SetProgram` edit writes `file: "…"`), and memory addresses are sliced with Option-drag's "take" fields (`[12:0]`, `[8:0]`). The lockstep harness now runs either a bare CPU on a reference board or a whole console (`GateConsole`: loads the program into the Rom, catches printed characters, reads N and R from the CPU inside). `wafer run prog.asm --gates` runs the project's `Console` if it has one, else `Crumb`; `--chip` picks.
+        - ✅ Built by the user on 2026-10-25: all 7 checks pass, and `console_vs_reference` matches the reference on every program. `count.asm` counts frames on the gate-level number display in step with the reference (milestone 3b's finish line), `hello.asm` prints its greeting, and `bounce.asm` bounces its ball on the gate-level screen.
   - **Also Claude:** a lockstep harness that runs the gate-level Crumb next to the reference Crumb with memory simulated in Rust, comparing after every instruction (so Crumb is checked before the Console exists); then the `--gates` checker on the Console, and the speed measurement at the end.
+    - ✅ Done 2026-10-25: the whole Console, built from our own Nand gates, runs about 37,000–44,000 instructions a second in a release build (75,000–89,000 ticks a second), so 18–22 frames a second at 4096 ticks per frame, before any turbo mode.
     - ✅ Done 2026-10-25: `wafer_core::lockstep` and `wafer run prog.asm --gates -p chips`. It compares PC and T after each instruction, N and R once the next fetch has landed the push, the number display, LEDs and console, and at the end all of RAM and the screen. A throwaway Crumb built to the plan matched the reference on hello.asm, count.asm, bounce.asm and nine instruction workouts.
     - **Speed, first measurement (2026-10-25):** the gate-level Crumb (our Nand-built gates throughout) runs about 5,000 instructions/s in a debug build and 40,000–60,000 instructions/s (80,000–120,000 ticks/s) in a release build (`cargo wafer` now builds in release). At 16,384 ticks per frame that's about 5 frames a second, so real-time games need turbo mode (3d) or fewer ticks per frame.
 - **3c, the console.** Screen panel, gamepad, LEDs and switches, number display, text console, frame counter and random port in the app, plus the cartridge menu.

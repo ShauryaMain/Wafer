@@ -88,10 +88,13 @@ enum Command {
         /// Save the screen as a PNG
         #[arg(long, value_name = "FILE")]
         png: Option<PathBuf>,
-        /// Run it on the gate-level Crumb chip (in the -p folder) next to the
-        /// reference, comparing after every instruction
+        /// Run it in gates (the -p folder's Console, or its Crumb if there's
+        /// no Console) next to the reference, comparing after every instruction
         #[arg(long)]
         gates: bool,
+        /// The chip to run with --gates: a whole console, or a CPU like Crumb
+        #[arg(long, requires = "gates")]
+        chip: Option<String>,
     },
 }
 
@@ -120,9 +123,9 @@ fn main() -> ExitCode {
     // Programs stand alone: they don't need the project.
     match cli.command {
         Command::Asm { file, list, output } => return crumb_cmd::asm(&file, list, output.as_deref(), &ui),
-        Command::Run { file, steps, frames, pad, screen, png, gates } => {
+        Command::Run { file, steps, frames, pad, screen, png, gates, chip } => {
             let gates = gates.then(|| cli.project.clone());
-            let options = crumb_cmd::RunOptions { steps, frames, pad, screen, png, gates };
+            let options = crumb_cmd::RunOptions { steps, frames, pad, screen, png, gates, chip };
             return crumb_cmd::run(&file, &options, &ui);
         }
         _ => {}

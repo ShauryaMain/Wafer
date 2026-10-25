@@ -1,0 +1,57 @@
+// The whole game console: Crumb, its program in a Rom, 8K words of RAM,
+// the 128×64 screen (512 words), and the ports (docs/crumb.md has the
+// memory map). AddressDecoder says which of them an address means: a
+// store reaches RAM or the screen only when it's theirs, and what Crumb
+// reads comes from the ROM, RAM, the screen or Ports, or is 0.
+//
+// The Rom holds count.asm, which counts frames on the number display and
+// the LEDs. The app (and `wafer run prog.asm --gates`) can load any other
+// program into it.
+chip Console {
+  in  reset, pad[8], switches[16]
+  out leds[16], number[16], char[8], print, pc[13], t[16], execute
+  crumb1 = Crumb(reset, mux3)
+  framecounter1 = FrameCounter(reset)
+  random1 = Random(reset)
+  addressdecoder1 = AddressDecoder(crumb1.addr)
+  and1 = And(crumb1.write, addressdecoder1.ram)
+  and2 = And(crumb1.write, addressdecoder1.screen)
+  rom1 = Rom(crumb1.addr[12:0], file: "count.asm")
+  ram1 = Ram(crumb1.addr[12:0], crumb1.mem_out, and1)
+  ram2 = Ram(crumb1.addr[8:0], crumb1.mem_out, and2)
+  ports1 = Ports(crumb1.addr, addressdecoder1.io, crumb1.write, crumb1.mem_out, reset, pad, framecounter1, random1, switches)
+  mux1 = Mux(ports1.out, ram2, addressdecoder1.screen)
+  mux2 = Mux(mux1, ram1, addressdecoder1.ram)
+  mux3 = Mux(mux2, rom1, addressdecoder1.rom)
+  leds = ports1.leds
+  number = ports1.number
+  char = ports1.char
+  print = ports1.print
+  pc = crumb1.pc
+  t = crumb1.t
+  execute = crumb1.execute
+}
+
+test Console {
+  set reset = 1, pad = 0, switches = 0
+  tick
+  set reset = 0
+  expect pc = 0, execute = 0, leds = 0, number = 0, print = 0
+  tick
+  expect execute = 1         // fetched `jump main` from the ROM...
+  tick
+  expect pc = 0x000D         // ...and jumped
+  // count.asm waits for frame 1 (tick 4096), then counts.
+  tick 3998
+  expect number = 0, leds = 0
+  tick 200
+  expect number = 1, leds = 1
+  // Reset clears the display but not RAM, where count.asm keeps its
+  // count, so it carries on from 1.
+  set reset = 1
+  tick
+  set reset = 0
+  expect pc = 0, number = 0, leds = 0
+  tick 100
+  expect number = 2, leds = 2   // the frame number changed (back to 0)
+}

@@ -23,6 +23,8 @@ pub struct RunOptions {
     pub png: Option<PathBuf>,
     /// The project holding the gate-level Crumb to check against.
     pub gates: Option<PathBuf>,
+    /// The chip in it to run: the Console, or Crumb if there's no Console.
+    pub chip: Option<String>,
 }
 
 /// Instructions `wafer run --gates` allows when nothing says when to stop.
@@ -197,8 +199,9 @@ fn show_outputs(m: &Machine, stack: Option<&str>, options: &RunOptions, ui: &Ui)
     ExitCode::SUCCESS
 }
 
-/// Runs the program on the gate-level `Crumb` chip and the reference side by
-/// side, and reports how fast the gates went.
+/// Runs the program in gates and on the reference side by side, and reports
+/// how fast the gates went. The gates are the whole `Console` if there is
+/// one (with the program loaded into its Rom), otherwise the `Crumb` CPU.
 fn run_gates(dir: &Path, words: &[u16], options: &RunOptions, ui: &Ui) -> ExitCode {
     use crumb::isa::{TICKS_PER_FRAME, TICKS_PER_INSTRUCTION};
     use wafer_core::lockstep::lockstep;
@@ -212,8 +215,13 @@ fn run_gates(dir: &Path, words: &[u16], options: &RunOptions, ui: &Ui) -> ExitCo
         }
     };
     let design = Design::check(&project);
-    if !design.chips.contains_key("Crumb") {
-        eprintln!("{} there's no `Crumb` chip in {} (pass the folder with -p)", ui.fail("error:"), dir.display());
+    let chip = match &options.chip {
+        Some(chip) => chip.as_str(),
+        None if design.chips.contains_key("Console") => "Console",
+        None => "Crumb",
+    };
+    if !design.chips.contains_key(chip) {
+        eprintln!("{} there's no `{chip}` chip in {} (pass the folder with -p)", ui.fail("error:"), dir.display());
         return ExitCode::FAILURE;
     }
     let max = match (options.frames, options.steps) {
@@ -221,10 +229,10 @@ fn run_gates(dir: &Path, words: &[u16], options: &RunOptions, ui: &Ui) -> ExitCo
         (None, Some(steps)) => steps,
         (None, None) => DEFAULT_GATE_STEPS,
     };
-    match lockstep(&design, "Crumb", words, max, TICKS_PER_FRAME) {
+    match lockstep(&design, chip, words, max, TICKS_PER_FRAME) {
         Ok(run) => {
             println!(
-                "{} the gate-level Crumb matched the reference for {} instructions ({} ticks){}",
+                "{} the gate-level {chip} matched the reference for {} instructions ({} ticks){}",
                 ui.pass("matched:"),
                 run.instructions,
                 run.ticks,
@@ -242,7 +250,12 @@ fn run_gates(dir: &Path, words: &[u16], options: &RunOptions, ui: &Ui) -> ExitCo
             show_outputs(&run.board, None, options, ui)
         }
         Err(failure) => {
-            eprintln!("{} {failure}", ui.fail("different:"));
+            // A chip that can't run at all isn't a difference.
+            let label = match failure {
+                wafer_core::lockstep::Failure::Setup(_) => "error:",
+                wafer_core::lockstep::Failure::Differs { .. } => "different:",
+            };
+            eprintln!("{} {failure}", ui.fail(label));
             ExitCode::FAILURE
         }
     }
