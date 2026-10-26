@@ -10,6 +10,7 @@
 //! the panel and the canvas show the game through the normal simulator;
 //! pausing hands the final state back for good.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -22,6 +23,7 @@ use wafer_core::netlist::NetId;
 use wafer_core::turbo::{Snapshot, Turbo};
 use wafer_core::{Logic, SourceMap, program};
 
+use crate::debugger::Source;
 use crate::simrun::SimRunner;
 use crate::theme;
 use crate::workspace::Workspace;
@@ -59,6 +61,37 @@ struct Wiring {
     inputs: [usize; 3],
     print: NetId,
     char: Vec<NetId>,
+    /// For breakpoints: Crumb's PC, and whether it's executing.
+    pc: Vec<NetId>,
+    execute: NetId,
+    /// The memories inside the CPU holding its data and return stacks:
+    /// the ones whose outputs are N and R.
+    data_stack: Option<usize>,
+    return_stack: Option<usize>,
+}
+
+impl Wiring {
+    /// Stopped just after a fetch, with the instruction at a breakpoint
+    /// about to run.
+    fn at_breakpoint(&self, bit: impl Fn(NetId) -> bool, breakpoints: &[bool]) -> bool {
+        bit(self.execute) && {
+            let pc = self.pc.iter().enumerate().fold(0, |acc, (i, &n)| acc | usize::from(bit(n)) << i);
+            breakpoints.get(pc).copied().unwrap_or(false)
+        }
+    }
+}
+
+/// Crumb's registers, read from the gates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Registers {
+    pub pc: Option<u16>,
+    pub t: Option<u16>,
+    pub n: Option<u16>,
+    pub r: Option<u16>,
+    /// The data stack under T, bottom first (as if it started empty), then T.
+    pub stack: Vec<Option<u16>>,
+    /// The return stack, bottom first.
+    pub returns: Vec<Option<u16>>,
 }
 
 /// What the app and the turbo thread pass each other.
@@ -74,6 +107,11 @@ struct Exchange {
     snapshot: Option<Snapshot>,
     /// Characters printed since the app last looked.
     printed: String,
+    /// Addresses to stop at, and whether that changed since turbo looked.
+    breakpoints: Vec<u16>,
+    breakpoints_changed: bool,
+    /// Turbo stopped itself at a breakpoint.
+    hit: bool,
 }
 
 /// Turbo running on its own thread. Dropping it stops the thread.
@@ -101,8 +139,18 @@ pub struct Player {
     /// The program file in the project folder; `None` plays the one the
     /// chip's Rom names.
     pub cartridge: Option<String>,
-    /// The cartridge's words, once it's assembled.
+    /// The cartridge's words, once it's assembled, and its source.
     program: Option<Vec<u16>>,
+    cartridge_source: Option<Source>,
+    /// The program being played, as source, for the debugger.
+    pub source: Option<Source>,
+    /// Addresses to stop at, just before the instruction there runs.
+    pub breakpoints: BTreeSet<u16>,
+    /// The last stop was a breakpoint.
+    pub hit: bool,
+    /// The simulator's tick count just after the last reset, where frames
+    /// start counting.
+    reset_tick: u64,
     /// The cartridge file as last read: (modified, length).
     stamp: Option<(SystemTime, u64)>,
     looked: Option<Instant>,
@@ -201,9 +249,106 @@ impl Player {
         }
     }
 
+    /// Whether the open chip is a console that's ready to play.
+    pub fn can_play(&self) -> bool {
+        self.wiring.is_some()
+    }
+
     /// Whether turbo is playing right now.
     pub fn in_turbo(&self) -> bool {
         self.worker.is_some()
+    }
+
+    /// Breakpoints as a quick lookup by address (empty when there are none).
+    fn breakpoint_map(&self) -> Vec<bool> {
+        let mut map = Vec::new();
+        if let Some(&last) = self.breakpoints.last() {
+            map = vec![false; usize::from(last) + 1];
+            for &b in &self.breakpoints {
+                map[usize::from(b)] = true;
+            }
+        }
+        map
+    }
+
+    /// Runs one instruction: to just after the next fetch, so the
+    /// instruction there is about to run.
+    pub fn step(&mut self, sim: &mut SimRunner) {
+        if self.running || self.wiring.is_none() {
+            return;
+        }
+        self.hit = false;
+        for _ in 0..4 {
+            self.run_for(sim, Duration::MAX, 1);
+            let executing =
+                (sim.sim.as_ref()).zip(self.wiring.as_ref()).is_some_and(|(s, w)| s.value(w.execute) == Logic::One);
+            if executing {
+                break;
+            }
+        }
+    }
+
+    /// Runs to the start of the next frame (or a breakpoint), then to the
+    /// next instruction.
+    pub fn step_frame(&mut self, sim: &mut SimRunner) {
+        if self.running || self.wiring.is_none() {
+            return;
+        }
+        self.hit = false;
+        // Frames count from reset, which was the tick before the count.
+        let since = sim.ticks().saturating_sub(self.reset_tick);
+        let left = TICKS_PER_FRAME - since % TICKS_PER_FRAME;
+        self.run_for(sim, Duration::MAX, left);
+        if !self.hit {
+            self.step(sim);
+        }
+    }
+
+    /// Crumb's registers and stacks, from the gates.
+    pub fn registers(&self, sim: &SimRunner) -> Option<Registers> {
+        let (s, w) = (sim.sim.as_ref()?, self.wiring.as_ref()?);
+        let read = |path: &str| s.read(path).and_then(|bits| bits_to_u64(&bits)).map(|v| v as u16);
+        let cpu = &w.parts.cpu;
+        let stack = |ram: Option<usize>, from: usize| -> Vec<Option<u16>> {
+            let Some(ram) = ram else { return Vec::new() };
+            let block = &s.netlist().rams[ram];
+            let Some(sp) = bits_to_u64(&s.values(&block.addr)) else { return Vec::new() };
+            let width = block.data.len().max(1);
+            let words = s.memory(ram);
+            (from..=sp as usize)
+                .map(|i| words.get(i * width..(i + 1) * width).and_then(bits_to_u64).map(|v| v as u16))
+                .collect()
+        };
+        let t = read("t");
+        let mut data = stack(w.data_stack, 2);
+        let empty = w.data_stack.and_then(|ram| bits_to_u64(&s.values(&s.netlist().rams[ram].addr))) == Some(0);
+        if !empty {
+            data.push(t);
+        }
+        Some(Registers {
+            pc: read("pc"),
+            t,
+            n: read(&format!("{cpu}.mem_out")),
+            r: read(&format!("{cpu}.r")),
+            stack: data,
+            returns: stack(w.return_stack, 1),
+        })
+    }
+
+    /// `count` words of RAM from `addr` (a RAM address, like a variable's).
+    pub fn ram_words(&self, sim: &SimRunner, addr: u16, count: usize) -> Vec<Option<u16>> {
+        let (Some(s), Some(w)) = (sim.sim.as_ref(), self.wiring.as_ref()) else { return Vec::new() };
+        let words = s.memory(w.parts.ram);
+        let start = usize::from(addr.wrapping_sub(crumb::isa::RAM_START));
+        (start..start + count)
+            .map(|i| words.get(i * 16..(i + 1) * 16).and_then(bits_to_u64).map(|v| v as u16))
+            .collect()
+    }
+
+    /// Whether the console is stopped just before an instruction (after a
+    /// fetch), where stepping and breakpoints leave it.
+    pub fn between_instructions(&self, sim: &SimRunner) -> bool {
+        (sim.sim.as_ref()).zip(self.wiring.as_ref()).is_some_and(|(s, w)| s.value(w.execute) == Logic::One)
     }
 
     /// Starts turbo on its own thread, from where the simulator is.
@@ -213,9 +358,17 @@ impl Player {
         let Ok(turbo) = compiled else { return };
         let mut turbo = turbo.clone();
         turbo.load(s);
-        let exchange = Arc::new(Mutex::new(Exchange { pad: self.pad, switches: self.switches, ..Exchange::default() }));
-        let (shared, inputs, print, char) = (exchange.clone(), w.inputs, w.print, w.char.clone());
-        let thread = std::thread::spawn(move || play(turbo, &shared, inputs, print, &char));
+        let exchange = Arc::new(Mutex::new(Exchange {
+            pad: self.pad,
+            switches: self.switches,
+            breakpoints: self.breakpoints.iter().copied().collect(),
+            breakpoints_changed: true,
+            ..Exchange::default()
+        }));
+        let watch =
+            Watch { inputs: w.inputs, print: w.print, char: w.char.clone(), pc: w.pc.clone(), execute: w.execute };
+        let shared = exchange.clone();
+        let thread = std::thread::spawn(move || play(turbo, &shared, &watch));
         self.worker = Some(Worker { exchange, thread: Some(thread) });
         self.measure = None;
     }
@@ -241,16 +394,31 @@ impl Player {
     fn trade(&mut self, sim: &mut SimRunner) {
         sim.trace = None;
         let Some(worker) = &self.worker else { return };
+        let mut hit = false;
         let snapshot = match worker.exchange.lock() {
             Ok(mut x) => {
                 x.pad = self.pad;
                 x.switches = self.switches;
                 x.wanted = true;
+                let breakpoints: Vec<u16> = self.breakpoints.iter().copied().collect();
+                if breakpoints != x.breakpoints {
+                    x.breakpoints = breakpoints;
+                    x.breakpoints_changed = true;
+                }
                 self.printed.push_str(&std::mem::take(&mut x.printed));
+                hit = x.hit;
                 x.snapshot.take()
             }
             Err(_) => None,
         };
+        if hit {
+            // Turbo stopped at a breakpoint: take its state back for good.
+            self.stop_turbo(sim);
+            self.running = false;
+            self.hit = true;
+            sim.retrace();
+            return;
+        }
         if let (Some(snapshot), Some(s)) = (snapshot, &mut sim.sim)
             && snapshot.apply(s).is_err()
         {
@@ -271,8 +439,9 @@ impl Player {
         }
         self.stamp = stamp;
         match load_program(&path) {
-            Ok(words) => {
+            Ok((words, source)) => {
                 self.program = Some(words);
+                self.cartridge_source = source;
                 self.error = None;
                 true
             }
@@ -289,6 +458,8 @@ impl Player {
     pub fn choose(&mut self, cartridge: Option<String>, sim: &mut SimRunner, ws: &Workspace) {
         self.cartridge = cartridge;
         self.program = None;
+        self.cartridge_source = None;
+        self.breakpoints.clear();
         self.stamp = None;
         self.error = None;
         self.looked = Some(Instant::now());
@@ -315,6 +486,9 @@ impl Player {
             self.stop_turbo(sim);
             sim.retrace();
         }
+        if running {
+            self.hit = false;
+        }
         self.running = running && self.wiring.is_some();
         self.measure = None;
     }
@@ -336,10 +510,28 @@ impl Player {
         };
         let input = |name: &str| netlist.inputs.iter().position(|i| i.path == name);
         let output = |name: &str| netlist.outputs.iter().find(|o| o.path == name).map(|o| o.nets.clone());
-        let (Some(reset), Some(pad), Some(switches), Some(print), Some(char)) =
-            (input("reset"), input("pad"), input("switches"), output("print"), output("char"))
-        else {
+        let (Some(reset), Some(pad), Some(switches), Some(print), Some(char), Some(pc), Some(execute)) = (
+            input("reset"),
+            input("pad"),
+            input("switches"),
+            output("print"),
+            output("char"),
+            output("pc"),
+            output("execute"),
+        ) else {
             return;
+        };
+        // The stacks: memories inside the CPU whose outputs are N and R.
+        let feeding = |signal: &str| {
+            let nets = &netlist.signal(&format!("{}.{signal}", parts.cpu))?.nets;
+            let inside = format!("{}.", parts.cpu);
+            netlist.rams.iter().position(|ram| ram.path.starts_with(&inside) && &ram.out == nets)
+        };
+        let (data_stack, return_stack) = (feeding("mem_out"), feeding("r"));
+        // The program, as source, for the debugger.
+        self.source = match &self.cartridge {
+            Some(_) => self.cartridge_source.clone(),
+            None => own_source(ws, chip),
         };
         if let Some(program) = &self.program {
             lockstep::load_program(s, parts.rom, program);
@@ -351,7 +543,17 @@ impl Player {
             return;
         }
         self.problem = None;
-        self.wiring = Some(Wiring { parts, inputs: [reset, pad, switches], print: print[0], char });
+        self.wiring = Some(Wiring {
+            parts,
+            inputs: [reset, pad, switches],
+            print: print[0],
+            char,
+            pc,
+            execute: execute[0],
+            data_stack,
+            return_stack,
+        });
+        self.hit = false;
         self.pulse_reset(sim);
     }
 
@@ -365,6 +567,7 @@ impl Player {
         }
         s.set_input(w.inputs[0], &bits_from_u64(0, 1));
         let _ = s.settle(MAX_STEPS);
+        self.reset_tick = s.ticks();
         self.printed.clear();
         if !self.running {
             sim.retrace();
@@ -380,13 +583,20 @@ impl Player {
         s.set_input(w.inputs[1], &bits_from_u64(u64::from(self.pad), 8));
         s.set_input(w.inputs[2], &bits_from_u64(u64::from(self.switches), 16));
         let start = Instant::now();
+        let breakpoints = self.breakpoint_map();
         let mut ticks = 0;
-        while ticks < max {
+        'run: while ticks < max {
             for _ in 0..max.saturating_sub(ticks).min(64) {
                 if s.settle(MAX_STEPS).is_err() {
                     self.problem = Some("the gates never settled".into());
                     self.running = false;
                     return;
+                }
+                // Not where it started: that may be a breakpoint it's leaving.
+                if ticks > 0 && !breakpoints.is_empty() && w.at_breakpoint(|n| s.value(n) == Logic::One, &breakpoints) {
+                    self.running = false;
+                    self.hit = true;
+                    break 'run;
                 }
                 if s.value(w.print) == Logic::One {
                     let c = bits_to_u64(&s.values(&w.char)).map_or(b'?', |c| c as u8);
@@ -461,12 +671,27 @@ impl Player {
     }
 }
 
+/// The nets the turbo thread drives and watches.
+struct Watch {
+    /// The `reset`, `pad` and `switches` inputs.
+    inputs: [usize; 3],
+    print: NetId,
+    char: Vec<NetId>,
+    pc: Vec<NetId>,
+    execute: NetId,
+}
+
 /// The turbo thread: runs the gates in batches, catching what's printed,
-/// at no more than sixty frames a second, until it's told to stop.
-fn play(mut turbo: Turbo, exchange: &Mutex<Exchange>, inputs: [usize; 3], print: NetId, char: &[NetId]) -> Turbo {
+/// at no more than sixty frames a second, until it's told to stop or
+/// reaches a breakpoint.
+fn play(mut turbo: Turbo, exchange: &Mutex<Exchange>, watch: &Watch) -> Turbo {
     let (start, from) = (Instant::now(), turbo.ticks());
     let mut printed = String::new();
-    loop {
+    let mut breakpoints: Vec<bool> = Vec::new();
+    let at_breakpoint = |turbo: &Turbo, breakpoints: &[bool]| {
+        turbo.bit(watch.execute) && breakpoints.get(turbo.read(&watch.pc) as usize).copied().unwrap_or(false)
+    };
+    'play: loop {
         let (pad, switches, reset) = {
             let Ok(mut x) = exchange.lock() else { break };
             if x.stop {
@@ -478,19 +703,33 @@ fn play(mut turbo: Turbo, exchange: &Mutex<Exchange>, inputs: [usize; 3], print:
                 x.snapshot = Some(turbo.snapshot());
                 x.wanted = false;
             }
+            if std::mem::take(&mut x.breakpoints_changed) {
+                breakpoints = vec![false; x.breakpoints.iter().max().map_or(0, |&b| usize::from(b) + 1)];
+                for &b in &x.breakpoints {
+                    breakpoints[usize::from(b)] = true;
+                }
+            }
             (x.pad, x.switches, std::mem::take(&mut x.reset))
         };
-        turbo.set_input(inputs[1], u64::from(pad));
-        turbo.set_input(inputs[2], u64::from(switches));
+        turbo.set_input(watch.inputs[1], u64::from(pad));
+        turbo.set_input(watch.inputs[2], u64::from(switches));
         if reset {
-            turbo.set_input(inputs[0], 1);
+            turbo.set_input(watch.inputs[0], 1);
             turbo.tick();
-            turbo.set_input(inputs[0], 0);
+            turbo.set_input(watch.inputs[0], 0);
         }
         for _ in 0..BATCH {
             turbo.settle();
-            if turbo.bit(print) {
-                let c = turbo.read(char) as u8;
+            // Not where it started: that may be a breakpoint it's leaving.
+            if turbo.ticks() > from && !breakpoints.is_empty() && at_breakpoint(&turbo, &breakpoints) {
+                if let Ok(mut x) = exchange.lock() {
+                    x.printed.push_str(&printed);
+                    x.hit = true;
+                }
+                break 'play;
+            }
+            if turbo.bit(watch.print) {
+                let c = turbo.read(&watch.char) as u8;
                 if c == b'\n' || (0x20..0x7f).contains(&c) {
                     printed.push(char::from(c));
                 }
@@ -507,16 +746,28 @@ fn play(mut turbo: Turbo, exchange: &Mutex<Exchange>, inputs: [usize; 3], print:
     turbo
 }
 
-/// Reads a program file: `.asm` assembled, or `.hex` words.
-fn load_program(path: &Path) -> Result<Vec<u16>, String> {
+/// Reads a program file: `.asm` assembled (with its source, for the
+/// debugger), or `.hex` words.
+fn load_program(path: &Path) -> Result<(Vec<u16>, Option<Source>), String> {
     let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let text = std::fs::read_to_string(path).map_err(|e| format!("can't read {name}: {e}"))?;
     let mut sources = SourceMap::default();
-    let file = sources.add(path.file_name().map(Into::into).unwrap_or_default(), text);
+    let file = sources.add(path.file_name().map(Into::into).unwrap_or_default(), text.clone());
     match program::load(&sources, file) {
-        Ok(program) => Ok(program.words.iter().map(|&w| w as u16).collect()),
+        Ok(program) => {
+            let words = program.words.iter().map(|&w| w as u16).collect();
+            Ok((words, program.assembled.map(|p| Source::new(name, text, p))))
+        }
         Err(errors) => Err(errors.iter().map(|d| d.render(&sources, false)).collect::<Vec<_>>().join("\n")),
     }
+}
+
+/// The program a console chip's own Rom holds, as source.
+fn own_source(ws: &Workspace, chip: &str) -> Option<Source> {
+    let held = ws.design.chips.get(chip)?.instances.iter().find_map(|i| i.program.as_ref())?;
+    let rom = ws.design.programs.get(&held.path)?;
+    let assembled = rom.assembled.clone()?;
+    Some(Source::new(held.name.clone(), ws.project.sources.get(rom.file).text.clone(), assembled))
 }
 
 /// Every program file in the project folder.

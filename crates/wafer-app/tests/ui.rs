@@ -2266,6 +2266,14 @@ fn console_button(h: &mut Harness<'static, WaferApp>, label: &str) {
     h.run_steps(3);
 }
 
+/// Clicks one of the Debugger tab's buttons. The top bar has its own Step;
+/// the Debugger's are lowest on the screen.
+fn debugger_button(h: &mut Harness<'static, WaferApp>, label: &str) {
+    let node = h.get_all(by().label(label)).max_by(|a, b| a.rect().min.y.total_cmp(&b.rect().min.y));
+    node.unwrap_or_else(|| panic!("no {label} button")).click();
+    h.run_steps(2);
+}
+
 /// Runs frames until `done` holds, for things another thread does.
 fn wait_for(h: &mut Harness<'static, WaferApp>, done: impl Fn(&Harness<'static, WaferApp>) -> bool, what: &str) {
     let start = std::time::Instant::now();
@@ -2408,4 +2416,81 @@ fn a_saved_cartridge_restarts() {
     assert!(error.contains("NUMBRE"), "{error}");
     assert_eq!(h.state().state.sim.ticks(), ticks, "it didn't start over");
     let _ = h.get_by_label("0022");
+}
+
+#[test]
+fn debugs_a_program() {
+    let dir = example_project("debugger");
+    let mut h = open_sized(&dir, egui::vec2(2000.0, 1400.0));
+    h.state_mut().state.open_chip("Console");
+    h.run_steps(3);
+    insert(&mut h, "bounce.asm");
+    h.state_mut().show_tab(Tab::Debugger);
+    h.run_steps(2);
+    let _ = h.get_by_label("At the start: Step to fetch the first instruction.");
+    let source = std::fs::read_to_string(dir.join("bounce.asm")).unwrap();
+    let program = crumb::assemble(&source).unwrap();
+    let pc = |h: &Harness<'static, WaferApp>| {
+        let st = &h.state().state;
+        st.console.registers(&st.sim).and_then(|r| r.pc)
+    };
+
+    // Step fetches `jump main`, and the next step jumps there.
+    debugger_button(&mut h, "Step");
+    assert_eq!(pc(&h), Some(0));
+    debugger_button(&mut h, "Step");
+    let main = program.symbol("main").unwrap().value;
+    assert_eq!(pc(&h), Some(main));
+    let main_line = source.lines().position(|l| l.contains("10 x !  20 y !")).unwrap();
+    let _ = h.get_by_label(&format!("Stopped: about to run line {}, `lit 10` in main (PC {main:04X}).", main_line + 1));
+
+    // A breakpoint on the line in main's loop that moves the ball (in view
+    // near main), then Continue (in turbo).
+    let line = source.lines().position(|l| l.trim() == "step-x step-y").unwrap();
+    h.run_steps(30); // let the source finish scrolling to main
+    h.get_by_label(&format!("breakpoint on line {}", line + 1)).click();
+    h.run_steps(1);
+    let step_x = h.state().state.console.source.as_ref().unwrap().address_of(line).unwrap();
+    assert!(h.state().state.console.breakpoints.contains(&step_x));
+    debugger_button(&mut h, "Continue");
+    assert!(h.state().state.console.in_turbo());
+    wait_for(&mut h, |h| !h.state().state.console.running, "the breakpoint");
+    h.run_steps(2);
+    assert!(h.state().state.console.hit);
+    assert_eq!(pc(&h), Some(step_x));
+    shot(&mut h, "debugger");
+
+    // Everything matches the reference stopped at the same place.
+    let mut reference = crumb::Machine::new(&program.words);
+    while reference.pc != step_x {
+        reference.step();
+    }
+    let st = &h.state().state;
+    let registers = st.console.registers(&st.sim).unwrap();
+    assert_eq!((registers.t, registers.n, registers.r), (Some(reference.t), Some(reference.n()), Some(reference.r())));
+    let some = |v: Vec<u16>| v.into_iter().map(Some).collect::<Vec<_>>();
+    assert_eq!(registers.stack, some(reference.stack()), "the data stack");
+    assert_eq!(registers.returns, some(reference.return_stack()), "the return stack");
+    for var in ["x", "y", "dx", "dy"] {
+        let at = program.symbol(var).unwrap().value;
+        let want = reference.ram[usize::from(at - crumb::isa::RAM_START)];
+        assert_eq!(st.console.ram_words(&st.sim, at, 1), [Some(want)], "{var}");
+    }
+    let x = program.symbol("x").unwrap().value;
+    let x_before = st.console.ram_words(&st.sim, x, 1)[0].unwrap();
+
+    // Step frame runs to the next frame without stopping at step-x...
+    debugger_button(&mut h, "Step frame");
+    assert!(!h.state().state.console.hit && pc(&h) != Some(step_x));
+    // ...and with Turbo off, Continue stops there again, a pixel further on.
+    h.state_mut().state.console.turbo_off = true;
+    debugger_button(&mut h, "Continue");
+    assert!(!h.state().state.console.in_turbo());
+    wait_for(&mut h, |h| !h.state().state.console.running, "the breakpoint again");
+    assert_eq!(pc(&h), Some(step_x));
+    let st = &h.state().state;
+    let x_after = st.console.ram_words(&st.sim, x, 1)[0].unwrap();
+    assert_eq!(x_after, x_before.wrapping_add(1), "the ball moved right by dx");
+    debugger_button(&mut h, "Clear breakpoints");
+    assert!(h.state().state.console.breakpoints.is_empty());
 }

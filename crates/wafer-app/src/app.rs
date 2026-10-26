@@ -12,7 +12,7 @@ use crate::code::CodePanel;
 use crate::simrun::{SimRunner, TestResults};
 use crate::timeline::{self, TimelineView};
 use crate::workspace::Workspace;
-use crate::{console, panels, theme};
+use crate::{console, debugger, panels, theme};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tab {
@@ -24,6 +24,7 @@ pub enum Tab {
     Timeline,
     Code,
     Console,
+    Debugger,
 }
 
 /// Everything except the dock layout, so panels can borrow it freely.
@@ -93,7 +94,7 @@ fn default_dock() -> DockState<Tab> {
     let surface = dock.main_surface_mut();
     let [center, _] = surface.split_left(NodeIndex::root(), 0.16, vec![Tab::Chips]);
     let [center, _] = surface.split_right(center, 0.72, vec![Tab::Inspector, Tab::Code, Tab::Console]);
-    surface.split_below(center, 0.68, vec![Tab::Timeline, Tab::Tests, Tab::Problems]);
+    surface.split_below(center, 0.68, vec![Tab::Timeline, Tab::Tests, Tab::Problems, Tab::Debugger]);
     dock
 }
 
@@ -268,6 +269,7 @@ impl TabViewer for Tabs<'_> {
             Tab::Timeline => "Timeline".into(),
             Tab::Code => "Code".into(),
             Tab::Console => "Console".into(),
+            Tab::Debugger => "Debugger".into(),
         }
     }
 
@@ -282,6 +284,7 @@ impl TabViewer for Tabs<'_> {
             Tab::Timeline => timeline::ui(ui, &mut state.timeline, &mut state.sim, &state.canvas.prefix),
             Tab::Code => state.code.ui(ui, &mut state.ws, &mut state.canvas),
             Tab::Console => console::ui(ui, state),
+            Tab::Debugger => debugger::ui(ui, state),
         }
     }
 
