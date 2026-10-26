@@ -78,7 +78,9 @@ fn compare(name: &str, turbo: &Turbo, setup: &Setup, printed: &[u8]) {
 fn turbo_plays_programs_like_the_reference() {
     let design = Design::check(&Project::load(&chips_dir()).expect("the chips folder is readable"));
     let read = |file: &str| std::fs::read_to_string(chips_dir().join(file)).expect("the program is readable");
-    for (name, frames) in [("hello.asm", 1), ("count.asm", 5), ("bounce.asm", 30), ("buttons.asm", 5)] {
+    // Pong serves its first ball at frame 40, so 60 frames see it in play.
+    for (name, frames) in [("hello.asm", 1), ("count.asm", 5), ("bounce.asm", 30), ("buttons.asm", 5), ("pong.asm", 60)]
+    {
         let program = crumb::assemble(&read(name)).expect("it assembles").words;
         let mut setup = setup(&design, &program);
         let mut turbo = Turbo::compile(&setup.netlist).expect("the Console compiles");
@@ -113,6 +115,25 @@ fn the_gamepad_reaches_turbo() {
     run(&mut turbo, &setup.netlist, 4 * TICKS_PER_FRAME, &mut Vec::new());
     setup.reference.run_frames(4);
     compare("buttons.asm held", &turbo, &setup, &[]);
+}
+
+#[test]
+fn pong_on_turbo_follows_your_paddle() {
+    let design = Design::check(&Project::load(&chips_dir()).expect("the chips folder is readable"));
+    let source = std::fs::read_to_string(chips_dir().join("pong.asm")).expect("pong.asm is readable");
+    let program = crumb::assemble(&source).expect("it assembles").words;
+    let mut setup = setup(&design, &program);
+    let mut turbo = Turbo::compile(&setup.netlist).expect("the Console compiles");
+    turbo.load(&setup.sim);
+    let pad = setup.netlist.inputs.iter().position(|i| i.path == "pad").expect("a pad input");
+    // Down for twenty frames, then up for twenty, with the ball served.
+    for (buttons, frames) in [(2, 20), (1, 20), (0, 15)] {
+        turbo.set_input(pad, buttons);
+        setup.reference.pad = buttons as u16;
+        run(&mut turbo, &setup.netlist, frames * TICKS_PER_FRAME, &mut Vec::new());
+        setup.reference.run_frames(frames);
+        compare("pong.asm", &turbo, &setup, &[]);
+    }
 }
 
 #[test]

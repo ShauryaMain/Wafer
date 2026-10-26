@@ -155,6 +155,23 @@ Decided along the way (no question needed):
 - **Stepping:** one instruction, one frame, and Continue. Breakpoints are checked once an instruction, in turbo too.
 - **Registers and stacks come from your gates:** PC and T from the Console's outputs, N and R from the CPU inside, and both stacks from the Stack memories that feed them.
 
+### Phase 3, round 9: the games (2026-10-26)
+
+| Topic | Decision |
+|---|---|
+| Who writes | ~~You write, Claude guides~~ → **Claude writes the games** (changed 2026-10-26). The user wrote Pong's first stage, then chose to focus on the hardware (improving the chip, building with gates), with Claude writing the games test-first |
+| Pong | **Against the computer.** The arrows move your paddle; the computer's paddle follows the ball with a speed limit, so it can be beaten |
+| Sound | **None in 3e.** The games stay silent; sound can be a milestone of its own |
+| Frame budget | **Keep 2,048 instructions a frame** (4096 ticks). Games draw only what changed, as real 8-bit games did; nothing in the hardware changes |
+
+Decided along the way (no question needed):
+
+- **Each game is built in stages**, each with its own tests and guide, like the chips were. Pong: the court and your paddle, then the ball, then the computer, then scoring. The tests run the game on the reference Crumb with scripted button presses and check its state through its `var`s by name, plus pixels on the screen. Each stage's guide names the vars and words the tests use.
+- **When a game is done**, a turbo check runs it on your gate-level Console for a few hundred frames and compares it with the reference.
+- **One `.asm` file per game.** The assembler has no `include`, and the Debugger shows one file, so shared words (pixel drawing, `wait-frame`) are copied into each game for now.
+- **Scores are drawn on the screen** with a small 3×5 digit font, and also shown on the number display.
+- **Writing happens in any text editor.** The Console restarts a cartridge when it's saved, shows assembler mistakes, and the Debugger finds the rest.
+
 ## Core principles
 
 1. **Instant feedback.** Everything is live: flip an input and watch the signal ripple through.
@@ -437,7 +454,8 @@ The spec is [docs/crumb.md](docs/crumb.md): memory map, instruction encoding, th
 - **3d, debugger and turbo. ✅ Done 2026-10-26.** Step one instruction, breakpoints, a register, stack and memory view, and a turbo mode fast enough for games. Planned in round 8: turbo compiles your gates (first), then a Debugger tab showing your `.asm` source. *Done when:* `bounce.asm` and `buttons.asm` play at 60 frames a second in turbo and still match the reference, and a breakpoint on a line of `bounce.asm` stops there with the right registers, stacks and variables.
   - **Turbo built 2026-10-26** (`wafer_core::turbo`). It sorts the gates once and simplifies them on the way in: numbers folded in, Nand-then-Not fused to And (and the like), Nand of two Nots to Or, unread gates dropped. That takes the Console from 4,585 gates to 2,419 ops a tick, which run at about 515,000 ticks a second in release (126 frames a second) when not held back. In the app it runs on its own thread, capped at 60 frames a second (measured 59.6), handing over its state every frame so the panel and canvas show the game through the normal simulator; Pause hands the final state back. The state is only the inputs, flip-flops, memories and tick count; the normal simulator works out every other wire itself, X and Z included. `turbo_vs_reference` checks hello, count, bounce (30 frames) and buttons (with buttons held) against the reference, and that the normal simulator carries on exactly after a hand-back. A Turbo checkbox next to Play (on by default) switches back to the normal simulator, and a chip turbo can't sort (a gate loop or shared wire) plays there with a note saying why.
   - **Debugger built 2026-10-26:** a Debugger tab beside Timeline, Tests and Problems, in three columns. First, the playing program's `.asm` source, with the line about to run highlighted and scrolled to, and breakpoints toggled with a click in the gutter (a breakpoint goes on the line's first instruction). Second, PC, T, N and R, plus both stacks, read from your gates: the stacks are the memories inside the CPU whose outputs are N and R, and their address bits are the stack pointers. Third, the program's `var`s read from RAM. It stops just after a fetch, with the next instruction about to run, so N and R have landed. Step runs one instruction, Step frame runs to the next frame (stopping at breakpoints), and Continue plays until a breakpoint, checked every instruction in turbo too. The status line says where it stopped, like "Stopped at a breakpoint: about to run line 68, `call step-x` in main". A UI test breaks in `bounce.asm` in turbo and checks the registers, stacks and variables against the reference stopped at the same instruction, then steps a frame and continues on the normal simulator.
-- **3e, games.** Pong, then Tetris, then Space Invaders.
+- **3e, games.** Pong, then Tetris, then Space Invaders. Planned in round 9: the user writes each game in stages from Claude's tests and guides; Pong is against the computer, the games are silent, and each frame gets 2,048 instructions. *Done when:* each game plays in the app and passes its tests on the reference, and its turbo check on the gate-level Console.
+  - **Pong ✅ 2026-10-26.** The user wrote stage 1 (the court and their paddle); Claude wrote the rest once the user chose to focus on hardware. You play the left paddle with up and down; the computer plays the right one, following the ball at a pixel a frame while it's coming and going back to the middle when it isn't. The 2×2 ball moves a pixel across each frame, and where it meets a paddle sets its slope (−2 to +2 rows a frame): hits off the ends fly steeply, which is how the computer gets beaten. A missed ball is a point, drawn in a 3×5 font either side of the net and shown on the number display as `0xPPCC`; after a pause the next ball goes to whoever lost the point. First to 9 wins (every LED lights if it's you), and Start begins a new game. Paddles flip only the rows that change, so a normal frame uses about 600 of the 2,048 instructions and the busiest (a point) about 950. `crates/crumb/tests/pong.rs` has 13 checks. They compare the whole screen against what the game's vars say should be drawn, and play a full game (9–8 over 7,652 frames) with every tenth frame checked. `turbo_vs_reference` plays it on the gate-level Console, with and without your paddle moving, and `wafer run --gates` matches it in lockstep.
 
 #### Still open
 
