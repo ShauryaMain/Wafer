@@ -318,6 +318,19 @@ impl Simulator {
         &self.memories[ram]
     }
 
+    /// Takes on a state another simulation of this netlist reached, like
+    /// turbo mode's: these nets (inputs and flip-flops), these memories'
+    /// words, and the tick count. Settle afterwards to work out the rest.
+    pub fn restore(&mut self, nets: &[(NetId, Logic)], memories: &[(usize, Vec<u64>)], ticks: u64) {
+        for &(net, value) in nets {
+            self.apply(net, value);
+        }
+        for (ram, words) in memories {
+            self.load_memory(*ram, words);
+        }
+        self.ticks = ticks;
+    }
+
     /// Fills a RAM with numbers, starting at address 0.
     pub fn load_memory(&mut self, ram: usize, words: &[u64]) {
         let width = self.netlist.rams[ram].data.len();

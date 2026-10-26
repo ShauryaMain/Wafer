@@ -137,6 +137,24 @@ Decided along the way (no question needed):
 - **Playing pauses the timeline's recording**, since 75,000 ticks a second of history is too much; pausing shows the canvas's live values as usual.
 - **Who builds:** 3c is app work, so Claude builds it and the user test-drives it, with a UI test for each piece.
 
+### Phase 3, round 8: the debugger and turbo mode (2026-10-25)
+
+Measured first: the Console's 4,585 gates (3,575 Nands, 1,010 Muxes) have no combinational loops, so they sort into one order with feedback only through the 179 flip-flops and 5 memories. A rough prototype that evaluates every gate once per tick, with plain 0s and 1s, ran `bounce.asm` at 172,000 ticks a second (42 frames a second, 2.3× the normal simulator), and its screen matched the reference exactly after 30 frames.
+
+| Topic | Decision |
+|---|---|
+| Turbo | **Compiled gates.** Your Console's gates, sorted once and evaluated straight through every tick with plain 0s and 1s, on their own thread. Aim: 60 frames a second. Turbo doesn't track X and Z, so the normal simulator stays the one that catches wiring mistakes |
+| Debugger | **A Debugger tab at the bottom**, next to Timeline, Tests and Problems: the program, registers, stacks and variables side by side, while the Console panel keeps showing the screen |
+| Program view | **Your `.asm` source**, with the line running now highlighted, breakpoints set by clicking a line, and the program's `var`s with their values |
+| Order | **Turbo first**, since it's the part with unknowns; then the debugger, which can stop turbo at a breakpoint |
+
+Decided along the way (no question needed):
+
+- **Turbo is a checkbox next to Play, on by default.** A chip it can't compile (a combinational loop, or a shared wire) plays on the normal simulator instead, and the panel says why.
+- **Pausing hands the state back.** When turbo stops, every net, flip-flop and memory goes back into the normal simulator, so the canvas, timeline and debugger show exactly where the game is.
+- **Stepping:** one instruction, one frame, and Continue. Breakpoints are checked once an instruction, in turbo too.
+- **Registers and stacks come from your gates:** PC and T from the Console's outputs, N and R from the CPU inside, and both stacks from the Stack memories that feed them.
+
 ## Core principles
 
 1. **Instant feedback.** Everything is live: flip an input and watch the signal ripple through.
@@ -416,12 +434,13 @@ The spec is [docs/crumb.md](docs/crumb.md): memory map, instruction encoding, th
     - **Speed, first measurement (2026-10-25):** the gate-level Crumb (our Nand-built gates throughout) runs about 5,000 instructions/s in a debug build and 40,000–60,000 instructions/s (80,000–120,000 ticks/s) in a release build (`cargo wafer` now builds in release). At 16,384 ticks per frame that's about 5 frames a second, so real-time games need turbo mode (3d) or fewer ticks per frame.
 - **3c, the console.** Screen panel, gamepad, LEDs and switches, number display, text console, frame counter and random port in the app, plus the cartridge menu. Planned in round 7: a Console panel beside the canvas running your gates, with a green LCD screen and cartridges that reload on save. *Done when:* `count.asm`, `hello.asm` and `bounce.asm` run in the panel on the gate-level Console, a new `buttons.asm` shows the gamepad working, and editing a cartridge's `.asm` restarts it.
   - Built 2026-10-25, for the user to test-drive: the **Console** tab (next to Inspector and Code) plays any chip with a console's ports on its gates, driving the same simulator the canvas shows. It has the green LCD (a pale margin so edge pixels show), 16 LEDs, the number display in hex and decimal, printed text, 16 switches, the gamepad (keys only while the screen has focus; Escape lets go), Play/Pause, Reset (memory kept) and Power (fresh). The cartridge menu lists the project's programs plus the chip's own; a chosen cartridge is reread when saved, and a mistake is shown while the last good version keeps playing. The tab comes forward when a playable console is opened and gives way to the Inspector when you open another chip. Saving a program no Rom holds no longer counts as a chip change, so it doesn't restart the simulator. Speed: about 76,000 ticks a second in release when running flat out (18.6 frames a second); the app gives it 12 ms of each frame. `buttons.asm` (LEDs show the buttons held, arrows move a dot, the number shows where) is checked on the reference and in lockstep.
-- **3d, debugger and turbo.** Step one instruction, breakpoints, a register, stack and memory view, and a turbo mode fast enough for games.
+- **3d, debugger and turbo.** Step one instruction, breakpoints, a register, stack and memory view, and a turbo mode fast enough for games. Planned in round 8: turbo compiles your gates (first), then a Debugger tab showing your `.asm` source. *Done when:* `bounce.asm` and `buttons.asm` play at 60 frames a second in turbo and still match the reference, and a breakpoint on a line of `bounce.asm` stops there with the right registers, stacks and variables.
+  - **Turbo built 2026-10-26** (`wafer_core::turbo`). It sorts the gates once and simplifies them on the way in: numbers folded in, Nand-then-Not fused to And (and the like), Nand of two Nots to Or, unread gates dropped. That takes the Console from 4,585 gates to 2,419 ops a tick, which run at about 515,000 ticks a second in release (126 frames a second) when not held back. In the app it runs on its own thread, capped at 60 frames a second (measured 59.6), handing over its state every frame so the panel and canvas show the game through the normal simulator; Pause hands the final state back. The state is only the inputs, flip-flops, memories and tick count; the normal simulator works out every other wire itself, X and Z included. `turbo_vs_reference` checks hello, count, bounce (30 frames) and buttons (with buttons held) against the reference, and that the normal simulator carries on exactly after a hand-back. A Turbo checkbox next to Play (on by default) switches back to the normal simulator, and a chip turbo can't sort (a gate loop or shared wire) plays there with a note saying why.
 - **3e, games.** Pong, then Tetris, then Space Invaders.
 
 #### Still open
 
-- Speed: measured (about 100,000 ticks a second for Crumb in gates, release build) and the frame length set from it (round 5). How turbo works is still open, for 3d.
+- Speed: measured (about 100,000 ticks a second for Crumb in gates, release build) and the frame length set from it (round 5). Turbo compiles the gates (round 8).
 
 ### Phase 4: Silicon
 

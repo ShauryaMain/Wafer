@@ -34,6 +34,7 @@ pub mod sim;
 pub mod svg;
 pub mod testing;
 pub mod trace;
+pub mod turbo;
 
 pub use check::Design;
 pub use diag::{Diagnostic, Severity, SourceMap, Span};

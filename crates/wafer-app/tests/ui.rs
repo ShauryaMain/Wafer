@@ -2266,6 +2266,16 @@ fn console_button(h: &mut Harness<'static, WaferApp>, label: &str) {
     h.run_steps(3);
 }
 
+/// Runs frames until `done` holds, for things another thread does.
+fn wait_for(h: &mut Harness<'static, WaferApp>, done: impl Fn(&Harness<'static, WaferApp>) -> bool, what: &str) {
+    let start = std::time::Instant::now();
+    while !done(h) {
+        assert!(start.elapsed() < std::time::Duration::from_secs(20), "gave up waiting for {what}");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        h.run_steps(1);
+    }
+}
+
 /// Picks a cartridge from the Console panel's menu, and lets it power on.
 fn insert(h: &mut Harness<'static, WaferApp>, cartridge: &str) {
     h.get(by().role(egui::accesskit::Role::ComboBox)).click();
@@ -2301,16 +2311,30 @@ fn plays_the_console() {
         st.console.pixel(&st.sim, x, y)
     };
     assert_eq!((lit(&h, 0, 0), lit(&h, 127, 63), lit(&h, 64, 30)), (Some(true), Some(true), Some(false)));
+    // Play: turbo runs it on its own thread, and the panel shows its state.
     let before = h.state().state.sim.ticks();
     console_button(&mut h, "Play");
-    h.run_steps(2);
-    assert!(h.state().state.console.running);
-    assert!(h.state().state.sim.ticks() > before, "it runs by itself");
+    assert!(h.state().state.console.running && h.state().state.console.in_turbo());
+    wait_for(&mut h, |h| h.state().state.sim.ticks() > before + 2048, "turbo to hand over a few batches");
     assert!(h.state().state.sim.trace.is_none(), "the timeline doesn't record while it plays");
+    let _ = h.get_by_label("Turbo");
     shot(&mut h, "console_panel");
     console_button(&mut h, "Pause");
-    assert!(!h.state().state.console.running);
-    assert!(h.state().state.sim.trace.is_some(), "and starts again after");
+    let paused = h.state().state.sim.ticks();
+    assert!(!h.state().state.console.running && !h.state().state.console.in_turbo());
+    assert!(paused > before + 2048, "the state was handed back");
+    assert!(h.state().state.sim.trace.is_some(), "and the timeline starts again");
+    assert_eq!(lit(&h, 0, 0), Some(true), "with the border still drawn");
+    h.run_steps(3);
+    assert_eq!(h.state().state.sim.ticks(), paused, "and nothing runs while paused");
+
+    // With Turbo off it plays on the normal simulator.
+    h.get_by_label("Turbo").click();
+    h.run_steps(1);
+    console_button(&mut h, "Play");
+    assert!(h.state().state.console.running && !h.state().state.console.in_turbo());
+    wait_for(&mut h, |h| h.state().state.sim.ticks() > paused, "the normal simulator to run");
+    console_button(&mut h, "Pause");
 
     // Reset keeps memory (the border stays); Power starts fresh.
     console_button(&mut h, "Reset");

@@ -4,8 +4,14 @@
 //! the keyboard while the screen has focus, and the switches from clicks.
 //! The cartridge menu puts any program in the project into the console's
 //! Rom, and a cartridge restarts by itself whenever its file is saved.
+//!
+//! Turbo mode compiles the gates and runs them on their own thread, at
+//! sixty frames a second. Each frame of the app it hands over its state, so
+//! the panel and the canvas show the game through the normal simulator;
+//! pausing hands the final state back for good.
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use crumb::isa::{BUTTONS, SCREEN_HEIGHT, SCREEN_WIDTH, TICKS_PER_FRAME};
@@ -13,6 +19,7 @@ use egui::{Color32, Key, RichText, Sense, Stroke, TextureOptions};
 use wafer_core::lockstep::{self, ConsoleParts};
 use wafer_core::logic::{bits_from_u64, bits_to_u64};
 use wafer_core::netlist::NetId;
+use wafer_core::turbo::{Snapshot, Turbo};
 use wafer_core::{Logic, SourceMap, program};
 
 use crate::simrun::SimRunner;
@@ -28,6 +35,10 @@ const LOOK_EVERY: Duration = Duration::from_millis(500);
 const MAX_STEPS: u64 = 100_000;
 /// Printed text kept for the panel.
 const MAX_PRINTED: usize = 20_000;
+/// Turbo plays in real time: no faster than this, however fast the gates go.
+const TURBO_FPS: f64 = 60.0;
+/// Clock ticks turbo runs between looks at what the app wants.
+const BATCH: u64 = 1024;
 
 /// The green LCD: lit pixels, dark pixels, and pixels whose bits are unknown.
 pub const LCD_ON: Color32 = Color32::from_rgb(0x0f, 0x38, 0x0f);
@@ -48,6 +59,35 @@ struct Wiring {
     inputs: [usize; 3],
     print: NetId,
     char: Vec<NetId>,
+}
+
+/// What the app and the turbo thread pass each other.
+#[derive(Default)]
+struct Exchange {
+    stop: bool,
+    pad: u16,
+    switches: u16,
+    /// Pull reset for a tick.
+    reset: bool,
+    /// The app wants the state, to show it.
+    wanted: bool,
+    snapshot: Option<Snapshot>,
+    /// Characters printed since the app last looked.
+    printed: String,
+}
+
+/// Turbo running on its own thread. Dropping it stops the thread.
+struct Worker {
+    exchange: Arc<Mutex<Exchange>>,
+    thread: Option<std::thread::JoinHandle<Turbo>>,
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        if let Ok(mut x) = self.exchange.lock() {
+            x.stop = true;
+        }
+    }
 }
 
 #[derive(Default)]
@@ -78,6 +118,11 @@ pub struct Player {
     pub fps: f32,
     measure: Option<(Instant, u64)>,
     texture: Option<egui::TextureHandle>,
+    /// Play on the normal simulator instead of turbo.
+    pub turbo_off: bool,
+    /// The chip compiled for turbo, once per power-on, or why it can't be.
+    compiled: Option<Result<Turbo, String>>,
+    worker: Option<Worker>,
     /// Which panel the app should bring to the front: this one (`true`)
     /// when a console you can play is opened, the Inspector (`false`) when
     /// you go from a console to some other chip.
@@ -93,7 +138,8 @@ impl Player {
         if !is_console {
             if self.powered.is_some() {
                 let showing = self.wiring.is_some();
-                *self = Player { cartridge: self.cartridge.take(), switches: self.switches, ..Player::default() };
+                let (cartridge, switches, turbo_off) = (self.cartridge.take(), self.switches, self.turbo_off);
+                *self = Player { cartridge, switches, turbo_off, ..Player::default() };
                 self.wants_front = showing.then_some(false);
             }
             return false;
@@ -111,6 +157,8 @@ impl Player {
             }
         }
         if self.powered.as_ref() != Some(&(chip.to_string(), sim.builds)) {
+            // A new simulator: turbo's state belongs to the old one.
+            self.worker = None;
             self.power_on(sim, ws, chip);
             // Only one that's ready to play: while you're still building
             // it, the Inspector is what you need.
@@ -120,12 +168,96 @@ impl Player {
         }
         if self.reset {
             self.reset = false;
-            self.pulse_reset(sim);
+            match &self.worker {
+                Some(worker) => {
+                    if let Ok(mut x) = worker.exchange.lock() {
+                        x.reset = true;
+                    }
+                    self.printed.clear();
+                }
+                None => self.pulse_reset(sim),
+            }
         }
         if self.running {
-            self.run_for(sim, BUDGET, u64::MAX);
+            if !self.turbo_off && self.worker.is_none() {
+                self.start_turbo(sim);
+            }
+            if self.turbo_off && self.worker.is_some() {
+                self.stop_turbo(sim);
+            }
+            match self.worker {
+                Some(_) => self.trade(sim),
+                None => self.run_for(sim, BUDGET, u64::MAX),
+            }
         }
         self.running
+    }
+
+    /// Why turbo can't play this chip, once it's been tried.
+    pub fn turbo_problem(&self) -> Option<&str> {
+        match &self.compiled {
+            Some(Err(problem)) => Some(problem),
+            _ => None,
+        }
+    }
+
+    /// Whether turbo is playing right now.
+    pub fn in_turbo(&self) -> bool {
+        self.worker.is_some()
+    }
+
+    /// Starts turbo on its own thread, from where the simulator is.
+    fn start_turbo(&mut self, sim: &SimRunner) {
+        let (Some(s), Some(w)) = (&sim.sim, &self.wiring) else { return };
+        let compiled = self.compiled.get_or_insert_with(|| Turbo::compile(s.netlist()));
+        let Ok(turbo) = compiled else { return };
+        let mut turbo = turbo.clone();
+        turbo.load(s);
+        let exchange = Arc::new(Mutex::new(Exchange { pad: self.pad, switches: self.switches, ..Exchange::default() }));
+        let (shared, inputs, print, char) = (exchange.clone(), w.inputs, w.print, w.char.clone());
+        let thread = std::thread::spawn(move || play(turbo, &shared, inputs, print, &char));
+        self.worker = Some(Worker { exchange, thread: Some(thread) });
+        self.measure = None;
+    }
+
+    /// Stops turbo and hands its state back to the simulator for good.
+    fn stop_turbo(&mut self, sim: &mut SimRunner) {
+        let Some(mut worker) = self.worker.take() else { return };
+        if let Ok(mut x) = worker.exchange.lock() {
+            x.stop = true;
+        }
+        let turbo = worker.thread.take().map(std::thread::JoinHandle::join);
+        if let Ok(mut x) = worker.exchange.lock() {
+            self.printed.push_str(&std::mem::take(&mut x.printed));
+        }
+        if let (Some(Ok(turbo)), Some(s)) = (turbo, &mut sim.sim) {
+            let _ = turbo.snapshot().apply(s);
+        }
+        self.measure = None;
+    }
+
+    /// The app's frame with turbo playing: pass it the buttons, and show
+    /// the state it hands over.
+    fn trade(&mut self, sim: &mut SimRunner) {
+        sim.trace = None;
+        let Some(worker) = &self.worker else { return };
+        let snapshot = match worker.exchange.lock() {
+            Ok(mut x) => {
+                x.pad = self.pad;
+                x.switches = self.switches;
+                x.wanted = true;
+                self.printed.push_str(&std::mem::take(&mut x.printed));
+                x.snapshot.take()
+            }
+            Err(_) => None,
+        };
+        if let (Some(snapshot), Some(s)) = (snapshot, &mut sim.sim)
+            && snapshot.apply(s).is_err()
+        {
+            self.problem = Some("the gates never settled".into());
+        }
+        self.trim_printed();
+        self.measure(sim.ticks());
     }
 
     /// Reads and assembles the cartridge if its file changed. True when
@@ -161,11 +293,13 @@ impl Player {
         self.error = None;
         self.looked = Some(Instant::now());
         self.read_cartridge(ws);
+        self.worker = None;
         sim.reset();
     }
 
     /// Everything fresh: memory all zeros and the cartridge put in again.
     pub fn power(&mut self, sim: &mut SimRunner) {
+        self.worker = None;
         sim.reset();
     }
 
@@ -178,6 +312,7 @@ impl Player {
     /// again, since it doesn't record while a game plays.
     pub fn set_running(&mut self, running: bool, sim: &mut SimRunner) {
         if self.running && !running {
+            self.stop_turbo(sim);
             sim.retrace();
         }
         self.running = running && self.wiring.is_some();
@@ -188,6 +323,7 @@ impl Player {
         self.powered = Some((chip.to_string(), sim.builds));
         self.printed.clear();
         self.wiring = None;
+        self.compiled = None;
         let Some(s) = &mut sim.sim else { return };
         let netlist = s.netlist();
         let parts = match ConsoleParts::find(&ws.design, chip, netlist) {
@@ -271,15 +407,21 @@ impl Player {
             // up from here.
             sim.retrace();
         }
-        let Some(s) = &sim.sim else { return };
+        self.trim_printed();
+        self.measure(sim.ticks());
+    }
+
+    fn trim_printed(&mut self) {
         if self.printed.len() > MAX_PRINTED {
             let cut = self.printed.len() - MAX_PRINTED;
             let cut = (cut..self.printed.len()).find(|&i| self.printed.is_char_boundary(i)).unwrap_or(0);
             self.printed.drain(..cut);
         }
-        // Frames a second, over half a second or so.
+    }
+
+    /// Frames a second, over half a second or so.
+    fn measure(&mut self, total: u64) {
         let now = Instant::now();
-        let total = s.ticks();
         match self.measure {
             Some((since, from)) if now.duration_since(since) >= Duration::from_millis(500) => {
                 let seconds = now.duration_since(since).as_secs_f32();
@@ -317,6 +459,52 @@ impl Player {
         }
         image
     }
+}
+
+/// The turbo thread: runs the gates in batches, catching what's printed,
+/// at no more than sixty frames a second, until it's told to stop.
+fn play(mut turbo: Turbo, exchange: &Mutex<Exchange>, inputs: [usize; 3], print: NetId, char: &[NetId]) -> Turbo {
+    let (start, from) = (Instant::now(), turbo.ticks());
+    let mut printed = String::new();
+    loop {
+        let (pad, switches, reset) = {
+            let Ok(mut x) = exchange.lock() else { break };
+            if x.stop {
+                x.printed.push_str(&printed);
+                break;
+            }
+            x.printed.push_str(&std::mem::take(&mut printed));
+            if x.wanted {
+                x.snapshot = Some(turbo.snapshot());
+                x.wanted = false;
+            }
+            (x.pad, x.switches, std::mem::take(&mut x.reset))
+        };
+        turbo.set_input(inputs[1], u64::from(pad));
+        turbo.set_input(inputs[2], u64::from(switches));
+        if reset {
+            turbo.set_input(inputs[0], 1);
+            turbo.tick();
+            turbo.set_input(inputs[0], 0);
+        }
+        for _ in 0..BATCH {
+            turbo.settle();
+            if turbo.bit(print) {
+                let c = turbo.read(char) as u8;
+                if c == b'\n' || (0x20..0x7f).contains(&c) {
+                    printed.push(char::from(c));
+                }
+            }
+            turbo.clock_edge();
+        }
+        turbo.settle();
+        let frames = (turbo.ticks() - from) as f64 / TICKS_PER_FRAME as f64;
+        let due = start + Duration::from_secs_f64(frames / TURBO_FPS);
+        if let Some(wait) = due.checked_duration_since(Instant::now()) {
+            std::thread::sleep(wait);
+        }
+    }
+    turbo
 }
 
 /// Reads a program file: `.asm` assembled, or `.hex` words.
@@ -411,6 +599,11 @@ fn controls(ui: &mut egui::Ui, player: &mut Player, sim: &mut SimRunner, ws: &Wo
             let running = !player.running;
             player.set_running(running, sim);
         }
+        let mut turbo = !player.turbo_off;
+        let hint = "Your gates compiled to run fast, at 60 frames a second. They don't track X and Z.";
+        if ui.checkbox(&mut turbo, "Turbo").on_hover_text(hint).changed() {
+            player.turbo_off = !turbo;
+        }
         if ui.button("Reset").on_hover_text("Pull reset for a tick: memory keeps its words").clicked() {
             player.press_reset();
         }
@@ -418,12 +611,19 @@ fn controls(ui: &mut egui::Ui, player: &mut Player, sim: &mut SimRunner, ws: &Wo
             player.power(sim);
         }
     });
+    let mode = if player.in_turbo() { "turbo · " } else { "" };
     let status = match (&player.problem, player.running) {
         (Some(problem), _) => RichText::new(format!("Can't play: {problem}")).color(theme::UNKNOWN),
-        (None, true) => RichText::new(format!("{:.1} frames/s · tick {}", player.fps, sim.ticks())).color(theme::ONE),
+        (None, true) => {
+            RichText::new(format!("{mode}{:.1} frames/s · tick {}", player.fps, sim.ticks())).color(theme::ONE)
+        }
         (None, false) => RichText::new(format!("paused · tick {}", sim.ticks())).color(theme::MUTED),
     };
     ui.label(status);
+    if let Some(problem) = player.turbo_problem().filter(|_| !player.turbo_off) {
+        let text = format!("Turbo can't play this chip: {problem}. Playing it on the normal simulator.");
+        ui.label(RichText::new(text).small().color(theme::WARNING));
+    }
     if let Some(error) = &player.error {
         ui.label(RichText::new(error).monospace().small().color(theme::UNKNOWN));
     }
